@@ -30,6 +30,7 @@
 #include "db/config.hh"
 #include "atomic_cell.hh"
 #include "utils/exceptions.hh"
+#include "parquet_writer.hh"
 
 #include <functional>
 #include <boost/iterator/iterator_facade.hpp>
@@ -535,6 +536,7 @@ private:
     bool _compression_enabled = false;
     std::unique_ptr<file_writer> _data_writer;
     std::unique_ptr<file_writer> _index_writer;
+    std::unique_ptr<parquet_writer> _parquet_writer;
     bool _tombstone_written = false;
     bool _static_row_written = false;
     // The length of partition header (partition key, partition deletion and static row, if present)
@@ -831,6 +833,7 @@ void writer::init_file_writers() {
     options.buffer_size = _sst.sstable_buffer_size;
     options.write_behind = 10;
 
+    _parquet_writer = std::make_unique<parquet_writer>(_sst.get_filename(), _schema);
     if (!_compression_enabled) {
         _data_writer = std::make_unique<crc32_checksummed_file_writer>(std::move(_sst._data_file), options);
     } else {
@@ -933,6 +936,7 @@ void writer::drain_tombstones(std::optional<position_in_partition_view> pos) {
 }
 
 void writer::consume_new_partition(const dht::decorated_key& dk) {
+    _parquet_writer->consume_new_partition(dk);
     _c_stats.start_offset = _data_writer->offset();
     _prev_row_start = _data_writer->offset();
 
@@ -968,6 +972,7 @@ void writer::consume_new_partition(const dht::decorated_key& dk) {
 }
 
 void writer::consume(tombstone t) {
+    _parquet_writer->consume(t);
     uint64_t current_pos = _data_writer->offset();
     auto dt = to_deletion_time(t);
     write(_sst.get_version(), *_data_writer, dt);
@@ -1264,6 +1269,7 @@ void writer::write_clustered(const clustering_row& clustered_row, uint64_t prev_
 }
 
 stop_iteration writer::consume(clustering_row&& cr) {
+    _parquet_writer->consume(cr);
     if (_write_regular_as_static) {
         ensure_tombstone_is_written();
         write_static_row(cr.cells(), column_kind::regular_column);
@@ -1348,12 +1354,14 @@ void writer::consume(rt_marker&& marker) {
 }
 
 stop_iteration writer::consume(range_tombstone&& rt) {
+    _parquet_writer->consume(rt);
     drain_tombstones(rt.position());
     _range_tombstones.apply(std::move(rt));
     return stop_iteration::no;
 }
 
 stop_iteration writer::consume_end_of_partition() {
+    _parquet_writer->consume_end_of_partition();
     drain_tombstones();
 
     write(_sst.get_version(), *_data_writer, row_flags::end_of_partition);
@@ -1384,6 +1392,7 @@ stop_iteration writer::consume_end_of_partition() {
 }
 
 void writer::consume_end_of_stream() {
+    _parquet_writer->consume_end_of_stream();
     if (_partition_key) {
         on_internal_error(sstlog, "Mutation stream ends with unclosed partition during write");
     }
