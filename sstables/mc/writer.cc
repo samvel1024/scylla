@@ -536,7 +536,7 @@ private:
     bool _compression_enabled = false;
     std::unique_ptr<file_writer> _data_writer;
     std::unique_ptr<file_writer> _index_writer;
-    std::unique_ptr<parquet_writer> _parquet_writer;
+    std::unique_ptr<parquet::parquet_writer> _parquet_writer;
     bool _tombstone_written = false;
     bool _static_row_written = false;
     // The length of partition header (partition key, partition deletion and static row, if present)
@@ -833,7 +833,7 @@ void writer::init_file_writers() {
     options.buffer_size = _sst.sstable_buffer_size;
     options.write_behind = 10;
 
-    _parquet_writer = std::make_unique<parquet_writer>(_sst.get_filename(), _schema);
+    _parquet_writer = std::make_unique<parquet::parquet_writer>(_sst.get_filename(), _schema);
     if (!_compression_enabled) {
         _data_writer = std::make_unique<crc32_checksummed_file_writer>(std::move(_sst._data_file), options);
     } else {
