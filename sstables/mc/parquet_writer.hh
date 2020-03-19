@@ -47,8 +47,8 @@ private:
         switch (sstable_type) {
             case _type::int32:
                 return Type::INT32;
-//            case _type::utf8:
-//                return Type::BYTE_ARRAY;
+            case _type::utf8:
+                return Type::BYTE_ARRAY;
             default:
                 return Type::UNDEFINED; // unsupported type
         }
@@ -228,7 +228,17 @@ private:
     void write_byte_array(seastarized::RowGroupWriter *rgw,
                           const std::vector<bytes> &cells,
                           const column_definition &def) {
-        // TODO
+        seastarized::ByteArrayWriter *col_writer = static_cast<seastarized::ByteArrayWriter *>(rgw->NextColumn().get0());
+
+        for (const auto &cell: cells) {
+            // TODO this is probably bad, need to use deserialize_value
+            sstring str = def.type->to_string(cell);
+            parquet::ByteArray value;
+            value.ptr = (const uint8_t *) (str.c_str());
+            value.len = str.size();
+            int16_t definition_level = 1;
+            col_writer->WriteBatch(1, &definition_level, nullptr, &value).get();
+        }
     }
 
 
