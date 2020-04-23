@@ -1214,6 +1214,7 @@ void writer::write_static_row(const row& static_row, column_kind kind) {
 }
 
 stop_iteration writer::consume(static_row&& sr) {
+    _parquet_writer->consume(sr);
     ensure_tombstone_is_written();
     write_static_row(sr.cells(), column_kind::static_column);
     return stop_iteration::no;
