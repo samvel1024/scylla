@@ -13,28 +13,41 @@
 #include <schema.hh>
 #include <iostream>
 
+
+namespace parquet {
+
+
+// Rookie debug printers and helpers that will be removed
 std::ostream &operator<<(std::ostream &os, const column_kind &p) {
     switch (p) {
         case column_kind::partition_key:
-            os << "partition_key" << std::endl;
+            os << "partition_key";
             break;
         case column_kind::clustering_key:
-            os << "clustering_key" << std::endl;
+            os << "clustering_key";
             break;
         case column_kind::regular_column:
-            os << "regular_column" << std::endl;
+            os << "regular_column";
             break;
         case column_kind::static_column:
-            os << "static_column" << std::endl;
+            os << "static_column";
             break;
     }
     return os;
 }
 
 
-namespace parquet {
+struct col_def_printer {
+    const column_definition &def;
+};
 
-// TODO will be removed
+// Brief printer
+std::ostream &operator<<(std::ostream &os, const col_def_printer &def) {
+    os << "ColDef{column=" << def.def.name_as_text() << ",kind=" << def.def.kind << ",id=" << def.def.id << "}";
+    return os;
+}
+
+// tail -f /tmp/parquet-trace.log
 std::ofstream _trace = std::ofstream("/tmp/parquet-trace.log", std::ofstream::binary);
 
 using pq_schema = std::shared_ptr<schema::GroupNode>;
@@ -42,11 +55,6 @@ using cell_buffer = std::vector<std::optional<bytes>>;
 using sstable_column = std::pair<column_kind, column_id>;
 using buffer_per_column = std::unordered_map<sstable_column, cell_buffer, utils::tuple_hash>;
 using sstable_schema = ::schema;
-
-
-std::ostream &trace_mc(const std::string &tag) {
-    return _trace << "[" << tag << "]";
-}
 
 class parquet_writer {
 
@@ -61,7 +69,8 @@ private:
     const pq_schema _pq_schema;
     std::shared_ptr<seastarized::FileFutureOutputStream> _pq_ostream;
     std::shared_ptr<seastarized::ParquetFileWriter> _pq_file_writer;
-    buffer_per_column _buffer;
+    buffer_per_column _clustering_buffer;
+    buffer_per_column _partition_buffer;
 
 
     std::ostream &trace(const std::string &tag) {
@@ -87,8 +96,6 @@ private:
         if (is_test_ks()) {
             const auto &columns = src_schema.all_columns();
             for (const auto &col_def : columns) {
-                trace("kind_id") << col_def.name_as_text() << " kind:" << col_def.kind << " id:" << col_def.id
-                                 << std::endl;
                 if (!col_def.is_atomic()) continue;
                 auto name = col_def.name_as_text();
 
@@ -96,6 +103,8 @@ private:
                 auto parquet_type = map_column_type(sstable_type);
                 if (parquet_type != Type::UNDEFINED) {
 
+                    trace("convert_to_parquet") << col_def_printer{col_def} << " mapped parquet type: " << parquet_type
+                                                << std::endl;
                     _pq_column_order.push_back(std::make_pair(col_def.kind, col_def.id));
                     fields.push_back(schema::PrimitiveNode::Make(
                             name, Repetition::OPTIONAL,
@@ -103,7 +112,6 @@ private:
                 }
             }
         }
-
         return std::static_pointer_cast<schema::GroupNode>(
                 schema::GroupNode::Make("schema", Repetition::REQUIRED, fields));
     }
@@ -140,6 +148,7 @@ private:
 
     // TODO will be removed
     std::string init_trace_tag(const std::string &str) {
+        // extract column name with keyspace
         std::string dir;
         {
             std::string l = str.substr(0, str.rfind('/'));
@@ -147,7 +156,11 @@ private:
             dir = ll.substr(ll.rfind('/') + 1);
         }
         std::string file = str.substr(str.rfind('/') + 1);
-        return dir + "/" + file;
+        auto tag = dir + "/" + file;
+        _trace << "[" << tag << "]"
+               << "================== NEW INSTANCE ================================================================"
+               << std::endl;
+        return tag;
     }
 
 
@@ -165,9 +178,9 @@ public:
             _pq_schema{convert_to_parquet(schema)},
             _pq_ostream{create_pq_ostream()},
             _pq_file_writer{create_pq_file_writer()},
-            _buffer{} {
+            _clustering_buffer{},
+            _partition_buffer{} {
         if (!is_test_ks()) return;
-        trace("construct") << filename << std::endl;
     }
 
     ~parquet_writer() {
@@ -178,7 +191,10 @@ public:
 
     void consume_new_partition(const dht::decorated_key &dk) {
         if (!is_test_ks()) return;
-        buffer_key_columns(dk.key(), column_kind::partition_key);
+        trace("consume_new_partition")
+                << "----------------------------------------------------------------------------------"
+                << std::endl;
+        buffer_key_columns(dk.key(), column_kind::partition_key, _partition_buffer);
     }
 
     void consume(tombstone t) {
@@ -188,46 +204,20 @@ public:
 
     void consume(static_row &sr) {
         if (!is_test_ks()) return;
-        try {
-            row::printer pr(this->_sstable_schema, column_kind::regular_column, sr.cells());
-            trace("consume_static_row ") << pr << std::endl;
-        } catch (...) {
-        }
+        trace("consume_static_row ") << std::endl;
+        buffer_non_key_colums(sr.cells(), _partition_buffer, column_kind::static_column);
     }
 
-
-    void add_to_buffer(column_kind kind, column_id id, std::optional<bytes> cell) {
-        _buffer[std::make_pair(kind, id)].push_back(cell);
-    }
 
     void consume(clustering_row &cr) {
         if (!is_test_ks()) return;
-        row::printer pr(this->_sstable_schema, column_kind::regular_column, cr.cells());
-        trace("consume_clustering_row_regular_column") << pr << std::endl;
+        trace("consume_clustering_row_regular_column") << std::endl;
 
         // Add clustering columns to the buffer
-        buffer_key_columns(cr.key(), column_kind::clustering_key);
+        buffer_key_columns(cr.key(), column_kind::clustering_key, _clustering_buffer);
 
         // Add regular columns to the buffer
-        cr.cells().for_each_cell([&](column_id id, const cell_and_hash &ch) {
-            const column_definition &col_def = _sstable_schema.column_at(column_kind::regular_column, id);
-            if (col_def.is_atomic()) {
-                atomic_cell_view acv = ch.cell.as_atomic_cell(
-                        _sstable_schema.column_at(col_def.kind, id));
-                if (acv.is_live()) {
-                    auto bytes = acv.value().linearize();
-                    trace("raw_to_string") << col_def.name_as_text() << ": " << col_def.type->to_string(bytes)
-                                           << std::endl;
-                    trace("bytes_size") << bytes.length() << std::endl;
-                    add_to_buffer(col_def.kind, id, {bytes});
-                } else {
-                    trace("raw_to_string") << col_def.name_as_text() << ": DEAD" << std::endl;
-                    add_to_buffer(col_def.kind, id, {});
-                }
-            }
-
-        });
-
+        buffer_non_key_colums(cr.cells(), _clustering_buffer, column_kind::regular_column);
 
     }
 
@@ -239,26 +229,54 @@ public:
 
     void consume_end_of_partition() {
         if (!is_test_ks()) return;
+        flush_buffer();
 
         trace("consume_end_of_partition") << std::endl
                                           << "******************************************************************"
                                           << std::endl;
+
     }
 
 private:
 
     template<typename T>
-    void buffer_key_columns(T &k, column_kind kind) {
+    void buffer_key_columns(T &k, column_kind kind, buffer_per_column &buf) {
         auto schema_wrapper = k.with_schema(_sstable_schema);
         const auto&[schema, key] = schema_wrapper;
         auto type_iterator = key.get_compound_type(schema)->types().begin();
         column_id id = 0;
         for (auto &&e : key.components(schema)) {
-            add_to_buffer(kind, id++, {to_bytes(e)});
+            auto bytes = to_bytes(e);
+            buf[std::make_pair(kind, id)].push_back({bytes});
+            const auto &col_def = _sstable_schema.column_at(kind, id);
+            trace("buffer_key_columns") << col_def_printer{col_def} << " bytes: " << bytes.size() << std::endl;
             ++type_iterator;
+            ++id;
         }
     }
 
+
+    // Used for buffering clustering static and regular columns and
+    void buffer_non_key_colums(row &row, buffer_per_column &buf, column_kind kind) {
+        row.for_each_cell([&](column_id id, const cell_and_hash &ch) {
+            const column_definition &col_def = _sstable_schema.column_at(kind, id);
+            trace("check") << col_def_printer{col_def} << std::endl;
+            if (col_def.is_atomic()) {
+                atomic_cell_view acv = ch.cell.as_atomic_cell(
+                        _sstable_schema.column_at(col_def.kind, id));
+                if (acv.is_live()) {
+                    auto bytes = acv.value().linearize();
+                    trace("buffer_non_key_columns") << col_def_printer{col_def} << " bytes: " << bytes.length()
+                                                    << std::endl;
+                    buf[std::make_pair(col_def.kind, id)].push_back({bytes});
+                } else {
+                    trace("buffer_non_key_columns") << col_def_printer{col_def} << " DEAD" << std::endl;
+                    buf[std::make_pair(col_def.kind, id)].push_back({});
+                }
+            }
+
+        });
+    }
 
     template<typename T>
     std::string vec_to_string(std::vector<T> &vec) {
@@ -276,7 +294,6 @@ private:
         std::vector<ValueType> vec;
         for (const auto &cell: cell_vec) {
             if (cell) {
-                trace("deserialize_sanity_check") << def.type->to_string(*cell) << std::endl;
                 const data_value value = def.type->deserialize_value(*cell);
                 vec.push_back(value_cast<ValueType>(value));
                 trace("deserialize_converted") << value << std::endl;
@@ -288,13 +305,9 @@ private:
     template<typename Writer, typename ValueType>
     void write_column(seastarized::RowGroupWriter *rgw, const cell_buffer &cells, const column_definition &def) {
         std::vector<ValueType> deserialized_values = deserialize<ValueType>(cells, def);
-        trace("write_col") << vec_to_string(deserialized_values) << std::endl;
         Writer *col_writer = static_cast<Writer *>(rgw->NextColumn().get0());
-        trace("got_writer") << std::endl;
         std::vector<int16_t> def_levels = make_def_levels(cells);
-        trace("write_col_def_levels") << vec_to_string(def_levels) << std::endl;
         col_writer->WriteBatch(cells.size(), def_levels.data(), nullptr, deserialized_values.data()).get0();
-        trace("wrote_batch") << std::endl;
     }
 
     void write_byte_array(seastarized::RowGroupWriter *rgw, const cell_buffer &cells, const column_definition &def) {
@@ -326,18 +339,42 @@ private:
         return vec;
     }
 
+
+    cell_buffer buffer_for(sstable_column &col) {
+        auto &col_def = _sstable_schema.column_at(col.first, col.second);
+        int partition_size = _clustering_buffer.size() == 0 ? 0 : _clustering_buffer.begin()->second.size();
+        if (partition_size == 0) {
+            return {};
+        }
+        if (col_def.is_partition_key() || col_def.is_static()) {
+            trace("buffer_for") << col_def.name_as_text() << " size: " << partition_size << " buffer_size: "
+                                << _partition_buffer[col].size() << std::endl;
+            assert(partition_size == 0 || _partition_buffer[col].size() > 0);
+            cell_buffer b;
+            for (int i = 0; i < partition_size; ++i) {
+                b.push_back(*_partition_buffer[col].begin());
+            }
+            return b;
+        } else {
+            return _clustering_buffer[col];
+        }
+
+    }
+
+
     void flush_buffer() {
         // TODO split into row groups more accurately
         //  now we write into one big row group
         auto rgw = _pq_file_writer->AppendRowGroup().get0();
 
-        trace("flushing") << "number of cols " << _buffer.size() << std::endl;
+        size_t target_rows_count = _clustering_buffer.size() == 0 ? 0 : _clustering_buffer.begin()->second.size();
+        // We can assume that all vectors in _clustering_buffer have equal size
+        for (auto &col_id : _pq_column_order) {
 
-        for (auto const &col_id : _pq_column_order) {
-
+            auto cells = buffer_for(col_id);
             auto &col_def = _sstable_schema.column_at(col_id.first, col_id.second);
-            auto &cells = _buffer[col_id];
-            trace("buffered_parquet_column") << col_def.name_as_text() << " size: " << cells.size() << std::endl;
+            trace("flush_buffer") << col_def_printer{col_def} << " size:" << cells.size() << std::endl;
+            assert(cells.size() == target_rows_count);
 
             auto type = map_column_type(col_def.type->get_kind());
             switch (type) {
@@ -353,6 +390,9 @@ private:
             }
 
         }
+
+        _clustering_buffer.clear();
+        _partition_buffer.clear();
     }
 
 public:
@@ -360,7 +400,6 @@ public:
     void consume_end_of_stream() {
         if (!is_test_ks()) return;
         trace("consume_end_of_stream") << std::endl;
-        flush_buffer();
     }
 
 };
