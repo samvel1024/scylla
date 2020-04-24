@@ -126,6 +126,30 @@ scan_scylla_source_directories(
         PATHS build/${BUILD_TYPE}/gen)
 
 set(SCYLLA_SOURCE_FILES
+experiment.cc
+        seastar/tests/unit/parquet/util.h
+        seastar/tests/unit/parquet/util.cc
+        seastar/tests/unit/parquet/test_encryption_util.h
+        seastar/tests/unit/parquet/statistics_test.cc
+        seastar/tests/unit/parquet/reader_test.cc
+        seastar/tests/unit/parquet/encoding_test.cc
+        seastar/tests/unit/parquet/types_test.cc
+        seastar/tests/unit/parquet/column_writer_test.cc
+        seastar/tests/unit/parquet/properties_test.cc
+        seastar/tests/unit/parquet/metadata_test.cc
+        seastar/tests/unit/parquet/test_util.cc
+        seastar/tests/unit/parquet/test_util.h
+        seastar/tests/unit/parquet/encryption_write_configurations_test.cc
+        seastar/tests/unit/parquet/random.cc
+        seastar/tests/unit/parquet/gtest_seastar_main.cc
+        seastar/tests/unit/parquet/schema_test.cc
+        seastar/tests/unit/parquet/gtest_util.cc
+        seastar/tests/unit/parquet/file_deserialize_test.cc
+        seastar/tests/unit/parquet/gtest_util.h
+        seastar/tests/unit/parquet/random.h
+        seastar/tests/unit/parquet/encryption_properties_test.cc
+        seastar/tests/unit/parquet/column_reader_test.cc
+        seastar/tests/unit/parquet/file_serialize_test.cc
         ${SCYLLA_ROOT_SOURCE_FILES}
         ${SCYLLA_GEN_SOURCE_FILES}
         ${SCYLLA_SUB_SOURCE_FILES})
