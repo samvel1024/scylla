@@ -1,20 +1,17 @@
 
 #pragma once
 
-#include <seastar/parquet/parquet/column_writer.h>
 #include <mutation_fragment.hh>
 #include <tombstone.hh>
 #include <dht/i_partitioner.hh>
 #include <range_tombstone.hh>
-#include <seastar/parquet/parquet/file_writer.h>
-#include <seastar/parquet/parquet/schema.h>
-#include <seastar/parquet/parquet/properties.h>
+#include <parquet4seastar/file_writer.hh>
 #include <seastar/core/sstring.hh>
 #include <schema.hh>
 #include <iostream>
 
 
-namespace parquet {
+namespace parquet4seastar {
 
 
 // Rookie debug printers and helpers that will be removed
@@ -50,8 +47,8 @@ std::ostream &operator<<(std::ostream &os, const col_def_printer &def) {
 // tail -f /tmp/parquet-trace.log
 std::ofstream _trace = std::ofstream("/tmp/parquet-trace.log", std::ofstream::binary);
 
-using pq_schema = std::shared_ptr<schema::GroupNode>;
-using cell_buffer = std::vector<std::optional<bytes>>;
+using pq_schema = writer_schema::schema;
+using cell_buffer = std::vector<std::optional<::bytes>>;
 using sstable_column = std::pair<column_kind, column_id>;
 using buffer_per_column = std::unordered_map<sstable_column, cell_buffer, utils::tuple_hash>;
 using sstable_schema = ::schema;
@@ -67,8 +64,8 @@ private:
     const sstable_schema &_sstable_schema;
     std::vector<sstable_column> _pq_column_order;
     const pq_schema _pq_schema;
-    std::shared_ptr<seastarized::FileFutureOutputStream> _pq_ostream;
-    std::shared_ptr<seastarized::ParquetFileWriter> _pq_file_writer;
+    std::vector<format::Type::type> _pq_types;
+    std::unique_ptr<file_writer> _pq_file_writer;
     buffer_per_column _clustering_buffer;
     buffer_per_column _partition_buffer;
 
@@ -77,21 +74,33 @@ private:
         return _trace << "[" << tag << ":" << _file_tag << "]";
     }
 
-    Type::type map_column_type(abstract_type::kind sstable_type) {
+    logical_type::logical_type map_column_type(abstract_type::kind sstable_type) {
+        using namespace logical_type;
         using _type = abstract_type::kind;
         switch (sstable_type) {
             case _type::int32:
-                return Type::INT32;
+                return INT32{};
             case _type::utf8:
-                return Type::BYTE_ARRAY;
+                return BYTE_ARRAY{};
             default:
-                return Type::UNDEFINED; // unsupported type
+                return UNKNOWN{}; // unsupported type
         }
     }
 
-    pq_schema convert_to_parquet(const sstable_schema &src_schema) {
+    static std::vector<format::Type::type> collect_leaf_types(const pq_schema& sch) {
+        using namespace writer_schema;
+        std::vector<format::Type::type> leaf_types;
+        for (const node& field : sch.fields) {
+            const auto& pn = std::get<primitive_node>(field);
+            auto physical_type = std::visit([] (const auto& x) { return x.physical_type; }, pn.logical_type);
+            leaf_types.push_back(physical_type);
+        }
+        return leaf_types;
+    }
 
-        schema::NodeVector fields;
+    pq_schema convert_to_parquet(const sstable_schema &src_schema) {
+        using namespace writer_schema;
+        schema sch;
         // TODO write normal code
         if (is_test_ks()) {
             const auto &columns = src_schema.all_columns();
@@ -100,49 +109,29 @@ private:
                 auto name = col_def.name_as_text();
 
                 auto sstable_type = col_def.type->get_kind();
-                auto parquet_type = map_column_type(sstable_type);
-                if (parquet_type != Type::UNDEFINED) {
+                auto pq_type = map_column_type(sstable_type);
 
-                    trace("convert_to_parquet") << col_def_printer{col_def} << " mapped parquet type: " << parquet_type
-                                                << std::endl;
+                if (!std::holds_alternative<logical_type::UNKNOWN>(pq_type)) {
                     _pq_column_order.push_back(std::make_pair(col_def.kind, col_def.id));
-                    fields.push_back(schema::PrimitiveNode::Make(
-                            name, Repetition::OPTIONAL,
-                            parquet_type, ConvertedType::NONE));
+                    sch.fields.push_back(primitive_node{
+                            name,
+                            true,
+                            pq_type,
+                            {},
+                            format::Encoding::RLE_DICTIONARY,
+                            format::CompressionCodec::GZIP});
                 }
             }
         }
-        return std::static_pointer_cast<schema::GroupNode>(
-                schema::GroupNode::Make("schema", Repetition::REQUIRED, fields));
+        return sch;
     }
 
-    std::shared_ptr<seastarized::FileFutureOutputStream>
-    create_pq_ostream() {
+    std::unique_ptr<file_writer> create_pq_file_writer() {
         std::string file = std::string(_file_tag);
         std::replace(file.begin(), file.end(), '/', '-');
         seastar::sstring parquet_file = "/tmp/scylla-parquet/" + file + ".parquet";
 
-        seastar::open_flags oflags =
-                seastar::open_flags::wo | seastar::open_flags::create | seastar::open_flags::truncate;
-        seastar::file out_file = seastar::open_file_dma(parquet_file, oflags).get0();
-        return std::make_shared<seastarized::FileFutureOutputStream>(seastar::make_file_output_stream(out_file));
-    }
-
-    std::shared_ptr<seastarized::ParquetFileWriter>
-    create_pq_file_writer() {
-
-        WriterProperties::Builder prop_builder;
-        prop_builder.compression(parquet::Compression::SNAPPY);
-        std::shared_ptr<WriterProperties> writer_properties = prop_builder.build();
-
-        std::string file = std::string(_file_tag);
-        std::replace(file.begin(), file.end(), '/', '-');
-        seastar::sstring parquet_file = "/tmp/scylla-parquet/" + file + ".parquet";
-
-        std::shared_ptr<parquet::seastarized::ParquetFileWriter> file_writer =
-                parquet::seastarized::ParquetFileWriter::Open(_pq_ostream, _pq_schema, writer_properties).get0();
-        return file_writer;
-
+        return file_writer::open(parquet_file, _pq_schema).get0();
     }
 
 
@@ -176,7 +165,7 @@ public:
             _sstable_schema{schema},
             _pq_column_order{},
             _pq_schema{convert_to_parquet(schema)},
-            _pq_ostream{create_pq_ostream()},
+            _pq_types{collect_leaf_types(_pq_schema)},
             _pq_file_writer{create_pq_file_writer()},
             _clustering_buffer{},
             _partition_buffer{} {
@@ -184,8 +173,7 @@ public:
     }
 
     ~parquet_writer() {
-        _pq_file_writer->Close().get0();
-        _pq_ostream->Close().get0();
+        _pq_file_writer->close().get0();
     }
 
 
@@ -302,29 +290,30 @@ private:
         return vec;
     }
 
-    template<typename Writer, typename ValueType>
-    void write_column(seastarized::RowGroupWriter *rgw, const cell_buffer &cells, const column_definition &def) {
+    template<format::Type::type ParquetType, typename ValueType>
+    void write_column(int col_index, const cell_buffer &cells, const column_definition &def) {
         std::vector<ValueType> deserialized_values = deserialize<ValueType>(cells, def);
-        Writer *col_writer = static_cast<Writer *>(rgw->NextColumn().get0());
+        auto& col_writer = _pq_file_writer->column<ParquetType>(col_index);
         std::vector<int16_t> def_levels = make_def_levels(cells);
-        col_writer->WriteBatch(cells.size(), def_levels.data(), nullptr, deserialized_values.data()).get0();
+        for (size_t i = 0; i < cells.size(); ++i) {
+            col_writer.put(def_levels[i], 0, deserialized_values[i]);
+        }
     }
 
-    void write_byte_array(seastarized::RowGroupWriter *rgw, const cell_buffer &cells, const column_definition &def) {
-        seastarized::ByteArrayWriter *col_writer = static_cast<seastarized::ByteArrayWriter *>(rgw->NextColumn().get0());
+    void write_byte_array(int col_index, const cell_buffer &cells, const column_definition &def) {
+        auto& col_writer = _pq_file_writer->column<format::Type::BYTE_ARRAY>(col_index);
 
         for (const auto &cell: cells) {
             if (cell) {
                 // TODO this is probably bad, need to use deserialize_value
                 sstring str = def.type->to_string(*cell);
-                parquet::ByteArray value;
-                value.ptr = (const uint8_t *) (str.c_str());
-                value.len = str.size();
+                std::basic_string_view<uint8_t> value{reinterpret_cast<const uint8_t*>(str.c_str()), str.size()};
                 int16_t definition_level = 1;
-                col_writer->WriteBatch(1, &definition_level, nullptr, &value).get0();
+                col_writer.put(definition_level, 0, value);
             } else {
                 int16_t definition_level = 0;
-                col_writer->WriteBatch(1, &definition_level, nullptr, nullptr).get0();
+                std::basic_string_view<uint8_t> value;
+                col_writer.put(definition_level, 0, value);
             }
         }
     }
@@ -365,9 +354,9 @@ private:
     void flush_buffer() {
         // TODO split into row groups more accurately
         //  now we write into one big row group
-        auto rgw = _pq_file_writer->AppendRowGroup().get0();
 
         size_t target_rows_count = _clustering_buffer.size() == 0 ? 0 : _clustering_buffer.begin()->second.size();
+        int col_index = 0;
         // We can assume that all vectors in _clustering_buffer have equal size
         for (auto &col_id : _pq_column_order) {
 
@@ -376,19 +365,20 @@ private:
             trace("flush_buffer") << col_def_printer{col_def} << " size:" << cells.size() << std::endl;
             assert(cells.size() == target_rows_count);
 
-            auto type = map_column_type(col_def.type->get_kind());
+            auto type = _pq_types[col_index];
             switch (type) {
-                case Type::INT32:
-                    write_column<seastarized::Int32Writer, int32_t>(rgw, cells, col_def);
+                case format::Type::INT32:
+                    write_column<format::Type::INT32, int32_t>(col_index, cells, col_def);
                     break;
-                case Type::BYTE_ARRAY:
-                    write_byte_array(rgw, cells, col_def);
+                case format::Type::BYTE_ARRAY:
+                    write_byte_array(col_index, cells, col_def);
                     break;
                 default:
                     break;
 
             }
 
+            ++col_index;
         }
 
         _clustering_buffer.clear();
