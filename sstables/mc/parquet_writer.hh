@@ -118,7 +118,7 @@ private:
                             true,
                             pq_type,
                             {},
-                            format::Encoding::RLE_DICTIONARY,
+                            format::Encoding::PLAIN,
                             format::CompressionCodec::GZIP});
                 }
             }
@@ -136,16 +136,8 @@ private:
 
 
     // TODO will be removed
-    std::string init_trace_tag(const std::string &str) {
-        // extract column name with keyspace
-        std::string dir;
-        {
-            std::string l = str.substr(0, str.rfind('/'));
-            std::string ll = l.substr(0, l.rfind('-'));
-            dir = ll.substr(ll.rfind('/') + 1);
-        }
-        std::string file = str.substr(str.rfind('/') + 1);
-        auto tag = dir + "/" + file;
+    std::string init_trace_tag(const std::string &str, const sstable_schema &schema) {
+        auto tag = std::string(schema.cf_name().c_str());
         _trace << "[" << tag << "]"
                << "================== NEW INSTANCE ================================================================"
                << std::endl;
@@ -155,13 +147,13 @@ private:
 
     // TODO this is added since this code is crashing for system keyspaces with some weird memory issues
     bool is_test_ks() {
-        return strcmp(_sstable_schema.ks_name().c_str(), test_keyspace) == 0;
+        return true;// strcmp(_sstable_schema.ks_name().c_str(), test_keyspace) == 0;
     }
 
 public:
 
     parquet_writer(seastar::sstring &&filename, const sstable_schema &schema) :
-            _file_tag{init_trace_tag(std::string(filename.c_str()))},
+            _file_tag{init_trace_tag(std::string(filename.c_str()), schema)},
             _sstable_schema{schema},
             _pq_column_order{},
             _pq_schema{convert_to_parquet(schema)},
@@ -236,8 +228,6 @@ private:
         for (auto &&e : key.components(schema)) {
             auto bytes = to_bytes(e);
             buf[std::make_pair(kind, id)].push_back({bytes});
-            const auto &col_def = _sstable_schema.column_at(kind, id);
-            trace("buffer_key_columns") << col_def_printer{col_def} << " bytes: " << bytes.size() << std::endl;
             ++type_iterator;
             ++id;
         }
@@ -246,9 +236,9 @@ private:
 
     // Used for buffering clustering static and regular columns and
     void buffer_non_key_colums(row &row, buffer_per_column &buf, column_kind kind) {
+				std::unordered_map<column_id, ::bytes> non_null_columns;
         row.for_each_cell([&](column_id id, const cell_and_hash &ch) {
             const column_definition &col_def = _sstable_schema.column_at(kind, id);
-            trace("check") << col_def_printer{col_def} << std::endl;
             if (col_def.is_atomic()) {
                 atomic_cell_view acv = ch.cell.as_atomic_cell(
                         _sstable_schema.column_at(col_def.kind, id));
@@ -256,14 +246,20 @@ private:
                     auto bytes = acv.value().linearize();
                     trace("buffer_non_key_columns") << col_def_printer{col_def} << " bytes: " << bytes.length()
                                                     << std::endl;
-                    buf[std::make_pair(col_def.kind, id)].push_back({bytes});
-                } else {
-                    trace("buffer_non_key_columns") << col_def_printer{col_def} << " DEAD" << std::endl;
-                    buf[std::make_pair(col_def.kind, id)].push_back({});
+                    non_null_columns[col_def.id] = bytes;
                 }
             }
-
         });
+				trace("coulumn_count") << _sstable_schema.columns_count(kind) << std::endl;
+        for(column_id id = 0; id < _sstable_schema.columns_count(kind); ++id){
+            auto it = non_null_columns.find(id);
+            if (it == non_null_columns.end()){
+	              buf[std::make_pair(kind, id)].push_back({});
+            }else {
+	              buf[std::make_pair(kind, id)].push_back({it->second});
+            }
+        }
+
     }
 
     template<typename T>
@@ -294,9 +290,16 @@ private:
     void write_column(int col_index, const cell_buffer &cells, const column_definition &def) {
         std::vector<ValueType> deserialized_values = deserialize<ValueType>(cells, def);
         auto& col_writer = _pq_file_writer->column<ParquetType>(col_index);
-        std::vector<int16_t> def_levels = make_def_levels(cells);
+        int non_null_count = 0;
         for (size_t i = 0; i < cells.size(); ++i) {
-            col_writer.put(def_levels[i], 0, deserialized_values[i]);
+        	if (cells[i]){
+                col_writer.put(1, 0, deserialized_values[non_null_count]);
+                non_null_count++;
+        	}else {
+        	    ValueType t;
+        	    col_writer.put(0, 0, t);
+        	}
+
         }
     }
 
@@ -308,24 +311,12 @@ private:
                 // TODO this is probably bad, need to use deserialize_value
                 sstring str = def.type->to_string(*cell);
                 std::basic_string_view<uint8_t> value{reinterpret_cast<const uint8_t*>(str.c_str()), str.size()};
-                int16_t definition_level = 1;
-                col_writer.put(definition_level, 0, value);
+                col_writer.put(1, 0, value);
             } else {
-                int16_t definition_level = 0;
                 std::basic_string_view<uint8_t> value;
-                col_writer.put(definition_level, 0, value);
+                col_writer.put(0, 0, value);
             }
         }
-    }
-
-
-    // TODO use some 21 century method (map, collect??)
-    std::vector<int16_t> make_def_levels(const cell_buffer &buf) {
-        std::vector<int16_t> vec = {};
-        for (auto &opt: buf) {
-            vec.push_back(opt ? 1 : 0);
-        }
-        return vec;
     }
 
 
