@@ -171,7 +171,6 @@ map_physical_type(abstract_type::kind scylla_type) {
  * LDT = local deletion time
  * MFDA = marked for delete at
  * TTL = time to live
- * SROW = static row
  * DELETION = deletion time (tombstone)
  * LIVENESS = liveness info
  * SHADOWABLE = shadowable deletion time (shadowable tombstone)
@@ -190,16 +189,16 @@ enum metadata_parts {
     HEADER_DELETION,
     HEADER_DELETION_LDT,
     HEADER_DELETION_MFDA,
-    SROW,
-    SROW_FLAGS,
-    SROW_EXTENDED_FLAGS,
-    SROW_CELLS,
-    SROW_CELLS_X,
-    SROW_CELLS_X_FLAGS,
-    SROW_CELLS_X_TS,
-    SROW_CELLS_X_LDT,
-    SROW_CELLS_X_TTL,
-    SROW_CELLS_X_VALUE,
+    STATIC_ROW,
+    STATIC_ROW_FLAGS,
+    STATIC_ROW_EXTENDED_FLAGS,
+    STATIC_ROW_CELLS,
+    STATIC_ROW_CELLS_X,
+    STATIC_ROW_CELLS_X_FLAGS,
+    STATIC_ROW_CELLS_X_TS,
+    STATIC_ROW_CELLS_X_LDT,
+    STATIC_ROW_CELLS_X_TTL,
+    STATIC_ROW_CELLS_X_VALUE,
     ROW,
     ROW_FLAGS,
     ROW_EXTENDED_FLAGS,
@@ -239,16 +238,16 @@ constexpr schema_mapping schema_mappings[parts::ENUM_SIZE] = {
     {0, 0, UNKNOWN{}}, // HEADER_DELETION,
     {0, 0, INT32{}}, // HEADER_DELETION_LDT,
     {0, 0, INT64{}}, // HEADER_DELETION_MFDA,
-    {1, 0, UNKNOWN{}}, // SROW,
-    {1, 0, UINT8{}}, // SROW_FLAGS,
-    {2, 0, UINT8{}}, // SROW_EXTENDED_FLAGS,
-    {1, 0, UNKNOWN{}}, // SROW_CELLS,
-    {2, 0, UNKNOWN{}}, // SROW_CELLS_X,
-    {2, 0, UNKNOWN{}}, // SROW_CELLS_X_FLAGS,
-    {3, 0, INT64{}}, // SROW_CELLS_X_TS,
-    {3, 0, INT32{}}, // SROW_CELLS_X_LDT,
-    {3, 0, INT32{}}, // SROW_CELLS_X_TTL,
-    {3, 0, UNKNOWN{}}, // SROW_CELLS_X_VALUE,
+    {1, 0, UNKNOWN{}}, // STATIC_ROW,
+    {1, 0, UINT8{}}, // STATIC_ROW_FLAGS,
+    {2, 0, UINT8{}}, // STATIC_ROW_EXTENDED_FLAGS,
+    {1, 0, UNKNOWN{}}, // STATIC_ROW_CELLS,
+    {2, 0, UNKNOWN{}}, // STATIC_ROW_CELLS_X,
+    {2, 0, UNKNOWN{}}, // STATIC_ROW_CELLS_X_FLAGS,
+    {3, 0, INT64{}}, // STATIC_ROW_CELLS_X_TS,
+    {3, 0, INT32{}}, // STATIC_ROW_CELLS_X_LDT,
+    {3, 0, INT32{}}, // STATIC_ROW_CELLS_X_TTL,
+    {3, 0, UNKNOWN{}}, // STATIC_ROW_CELLS_X_VALUE,
     {1, 1, UNKNOWN{}}, // ROW,
     {1, 1, UINT8{}}, // ROW_FLAGS,
     {2, 1, UINT8{}}, // ROW_EXTENDED_FLAGS,
@@ -373,16 +372,16 @@ scylla_schema_to_parquet_writer_schema(const scylla_schema& scylla_sch) {
         }
         pws.p4s_schema.fields.push_back(std::move(header));
     }
-    // srow
+    // static_row
     {
-        auto srow = make_struct("static_row", true);
-        srow.fields.push_back(make_leaf(
-                "flags", false, schema_mappings[SROW_FLAGS].pq_type));
-        pws.metadata_mappings[SROW_FLAGS] = leaf_idx++;
-        srow.fields.push_back(make_leaf(
-                "extended_flags", true, schema_mappings[SROW_EXTENDED_FLAGS].pq_type));
-        pws.metadata_mappings[SROW_EXTENDED_FLAGS] = leaf_idx++;
-        auto srow_cells = make_struct("cells", false);
+        auto static_row = make_struct("static_row", true);
+        static_row.fields.push_back(make_leaf(
+                "flags", false, schema_mappings[STATIC_ROW_FLAGS].pq_type));
+        pws.metadata_mappings[STATIC_ROW_FLAGS] = leaf_idx++;
+        static_row.fields.push_back(make_leaf(
+                "extended_flags", true, schema_mappings[STATIC_ROW_EXTENDED_FLAGS].pq_type));
+        pws.metadata_mappings[STATIC_ROW_EXTENDED_FLAGS] = leaf_idx++;
+        auto static_row_cells = make_struct("cells", false);
         for (const auto& col_def : scylla_sch.static_columns()) {
             int id = (int)col_def.ordinal_id;
             logical_type::logical_type pq_type = pws.cell_mappings[id].pq_type;
@@ -390,26 +389,26 @@ scylla_schema_to_parquet_writer_schema(const scylla_schema& scylla_sch) {
                 continue;
             }
 
-            auto srow_cells_X = make_struct(col_def.name_as_text(), true);
-            srow_cells_X.fields.push_back(make_leaf(
-                    "flags", false, schema_mappings[SROW_CELLS_X_FLAGS].pq_type));
+            auto static_row_cells_X = make_struct(col_def.name_as_text(), true);
+            static_row_cells_X.fields.push_back(make_leaf(
+                    "flags", false, schema_mappings[STATIC_ROW_CELLS_X_FLAGS].pq_type));
             pws.cell_mappings[id].flags = leaf_idx++;
-            srow_cells_X.fields.push_back(make_leaf(
-                    "delta_timestamp", true, schema_mappings[SROW_CELLS_X_TS].pq_type));
+            static_row_cells_X.fields.push_back(make_leaf(
+                    "delta_timestamp", true, schema_mappings[STATIC_ROW_CELLS_X_TS].pq_type));
             pws.cell_mappings[id].ts = leaf_idx++;
-            srow_cells_X.fields.push_back(make_leaf(
-                    "delta_local_deletion_time", true, schema_mappings[SROW_CELLS_X_LDT].pq_type));
+            static_row_cells_X.fields.push_back(make_leaf(
+                    "delta_local_deletion_time", true, schema_mappings[STATIC_ROW_CELLS_X_LDT].pq_type));
             pws.cell_mappings[id].ldt = leaf_idx++;
-            srow_cells_X.fields.push_back(make_leaf(
-                    "delta_ttl", true, schema_mappings[SROW_CELLS_X_TTL].pq_type));
+            static_row_cells_X.fields.push_back(make_leaf(
+                    "delta_ttl", true, schema_mappings[STATIC_ROW_CELLS_X_TTL].pq_type));
             pws.cell_mappings[id].ttl = leaf_idx++;
-            srow_cells_X.fields.push_back(make_leaf(
+            static_row_cells_X.fields.push_back(make_leaf(
                     "value", true, pq_type));
             pws.cell_mappings[id].value = leaf_idx++;
-            srow_cells.fields.push_back(std::move(srow_cells_X));
+            static_row_cells.fields.push_back(std::move(static_row_cells_X));
         }
-        srow.fields.push_back(std::move(srow_cells));
-        pws.p4s_schema.fields.push_back(std::move(srow));
+        static_row.fields.push_back(std::move(static_row_cells));
+        pws.p4s_schema.fields.push_back(std::move(static_row));
     }
     // row
     {
@@ -519,12 +518,12 @@ class parquet_writer {
     parquet_writer_schema _pws;
     std::unique_ptr<parquet4seastar::file_writer> _writer;
     std::vector<bool> _cells_written;
-    bool _written_srow = false;
+    bool _written_static_row = false;
     bool _written_row = false;
 private:
     parquet_writer() {};
     bool is_current_row_static() {
-        return _pws.scylla_sch->static_columns().size() > 0 && !_written_srow;
+        return _pws.scylla_sch->static_columns().size() > 0 && !_written_static_row;
     }
     int rep() {
         if (is_current_row_static()) {
@@ -566,19 +565,19 @@ public:
         const cell_mapping& c = _pws.cell_mappings[ordinal_id];
         int writer_id;
         switch (Part) {
-            case parts::SROW_CELLS_X_FLAGS:
+            case parts::STATIC_ROW_CELLS_X_FLAGS:
             case parts::ROW_REGULAR_X_FLAGS:
                 writer_id = c.flags;
                 break;
-            case parts::SROW_CELLS_X_TS:
+            case parts::STATIC_ROW_CELLS_X_TS:
             case parts::ROW_REGULAR_X_TS:
                 writer_id = c.ts;
                 break;
-            case parts::SROW_CELLS_X_LDT:
+            case parts::STATIC_ROW_CELLS_X_LDT:
             case parts::ROW_REGULAR_X_LDT:
                 writer_id = c.ldt;
                 break;
-            case parts::SROW_CELLS_X_TTL:
+            case parts::STATIC_ROW_CELLS_X_TTL:
             case parts::ROW_REGULAR_X_TTL:
                 writer_id = c.ttl;
                 break;
@@ -613,21 +612,21 @@ public:
     }
     void write_row_flags(uint8_t flags) {
         if (is_current_row_static()) {
-            write_metadata<parts::SROW_FLAGS>(1, rep(), flags);
+            write_metadata<parts::STATIC_ROW_FLAGS>(1, rep(), flags);
         } else {
             write_metadata<parts::ROW_FLAGS>(1, rep(), flags);
         }
     }
     void write_row_extended_flags(uint8_t eflags) {
         if (is_current_row_static()) {
-            write_metadata<parts::SROW_EXTENDED_FLAGS>(1, rep(), eflags);
+            write_metadata<parts::STATIC_ROW_EXTENDED_FLAGS>(1, rep(), eflags);
         } else {
             write_metadata<parts::ROW_EXTENDED_FLAGS>(2, rep(), eflags);
         }
     }
     void write_row_extended_flags_empty() {
         if (is_current_row_static()) {
-            write_metadata<parts::SROW_EXTENDED_FLAGS>(0, rep(), 0);
+            write_metadata<parts::STATIC_ROW_EXTENDED_FLAGS>(0, rep(), 0);
         } else {
             write_metadata<parts::ROW_EXTENDED_FLAGS>(1, rep(), 0);
         }
@@ -672,18 +671,18 @@ public:
         write_metadata<parts::ROW_SHADOWABLE_MFDA>(1, rep(), 0);
         write_metadata<parts::ROW_SHADOWABLE_LDT>(1, rep(), 0);
     }
-    void write_srow_empty() {
-        write_metadata<parts::SROW_FLAGS>(0, 0, 0);
-        write_metadata<parts::SROW_EXTENDED_FLAGS>(0, 0, 0);
+    void write_static_row_empty() {
+        write_metadata<parts::STATIC_ROW_FLAGS>(0, 0, 0);
+        write_metadata<parts::STATIC_ROW_EXTENDED_FLAGS>(0, 0, 0);
         for (const auto& col_def : _pws.scylla_sch->static_columns()) {
             int id = (int)col_def.ordinal_id;
             if (!is_supported_type(_pws, id)) {
                 continue;
             }
-            write_cell_metadata<parts::SROW_CELLS_X_FLAGS>(id, 0, 0, 0);
-            write_cell_metadata<parts::SROW_CELLS_X_TS>(id, 0, 0, 0);
-            write_cell_metadata<parts::SROW_CELLS_X_LDT>(id, 0, 0, 0);
-            write_cell_metadata<parts::SROW_CELLS_X_TTL>(id, 0, 0, 0);
+            write_cell_metadata<parts::STATIC_ROW_CELLS_X_FLAGS>(id, 0, 0, 0);
+            write_cell_metadata<parts::STATIC_ROW_CELLS_X_TS>(id, 0, 0, 0);
+            write_cell_metadata<parts::STATIC_ROW_CELLS_X_LDT>(id, 0, 0, 0);
+            write_cell_metadata<parts::STATIC_ROW_CELLS_X_TTL>(id, 0, 0, 0);
         }
     }
     void write_clustering_key(const clustering_key_prefix& key) {
@@ -770,8 +769,8 @@ public:
             rep = schema_mappings[parts::HEADER_PARTITION_KEY_X].rep;
             break;
         case column_kind::static_column:
-            def = schema_mappings[parts::SROW_CELLS_X_VALUE].def;
-            rep = schema_mappings[parts::SROW_CELLS_X_VALUE].rep;
+            def = schema_mappings[parts::STATIC_ROW_CELLS_X_VALUE].def;
+            rep = schema_mappings[parts::STATIC_ROW_CELLS_X_VALUE].rep;
             break;
         case column_kind::clustering_key:
             def = schema_mappings[parts::ROW_KEY_X].def;
@@ -978,7 +977,7 @@ public:
             write_cell_empty(id);
         }
     }
-    void write_srow_fill() {
+    void write_static_row_fill() {
         for (const auto& col_def : _pws.scylla_sch->static_columns()) {
             int id = (int)col_def.ordinal_id;
             if (!is_supported_type(_pws, id)) {
@@ -1051,18 +1050,18 @@ public:
         _cells_written[ordinal_id] = true;
     }
     void finish_static_row() {
-        write_srow_fill();
-        _written_srow = true;
+        write_static_row_fill();
+        _written_static_row = true;
     }
     void finish_partition() {
         if (!_written_row) {
             write_rows_empty();
         }
-        if (!_written_srow) {
-            write_srow_empty();
+        if (!_written_static_row) {
+            write_static_row_empty();
         }
         _written_row = false;
-        _written_srow = false;
+        _written_static_row = false;
     }
 };
 
