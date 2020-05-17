@@ -210,6 +210,14 @@ struct parquet_writer_schema {
     int leaves;
 };
 
+bool is_supported_type(const parquet_writer_schema& pws, int ordinal_id) {
+    const auto& pq_type = pws.cell_mappings[ordinal_id].pq_type;
+    const auto& col_def = pws.scylla_sch->column_at((ordinal_column_id)ordinal_id);
+    return col_def.is_atomic()
+        && !std::holds_alternative<UNKNOWN>(pq_type);
+}
+
+
 parquet_writer_schema
 scylla_schema_to_parquet_writer_schema(const scylla_schema& scylla_sch) {
     using namespace parquet4seastar;
@@ -260,8 +268,8 @@ scylla_schema_to_parquet_writer_schema(const scylla_schema& scylla_sch) {
             for (const auto& col_def : scylla_sch.partition_key_columns()) {
                 int id = (int)col_def.ordinal_id;
                 logical_type::logical_type pq_type = pws.cell_mappings[id].pq_type;
-                if (std::holds_alternative<logical_type::UNKNOWN>(pq_type)) {
-                    continue; // TODO: support all abstract types
+                if (!is_supported_type(pws, id)) {
+                    continue;
                 }
 
                 auto header_partition_key_X = make_leaf(
@@ -297,8 +305,8 @@ scylla_schema_to_parquet_writer_schema(const scylla_schema& scylla_sch) {
         for (const auto& col_def : scylla_sch.static_columns()) {
             int id = (int)col_def.ordinal_id;
             logical_type::logical_type pq_type = pws.cell_mappings[id].pq_type;
-            if (std::holds_alternative<logical_type::UNKNOWN>(pq_type)) {
-                continue; // TODO: support all abstract types
+            if (!is_supported_type(pws, id)) {
+                continue;
             }
 
             auto srow_cells_X = make_struct(col_def.name_as_text(), true);
@@ -377,8 +385,8 @@ scylla_schema_to_parquet_writer_schema(const scylla_schema& scylla_sch) {
             for (const auto& col_def : scylla_sch.clustering_key_columns()) {
                 int id = (int)col_def.ordinal_id;
                 logical_type::logical_type pq_type = pws.cell_mappings[id].pq_type;
-                if (std::holds_alternative<logical_type::UNKNOWN>(pq_type)) {
-                    continue; // TODO: support all abstract types
+                if (!is_supported_type(pws, id)) {
+                    continue;
                 }
 
                 auto row_cells_key_X = make_leaf(
@@ -394,7 +402,7 @@ scylla_schema_to_parquet_writer_schema(const scylla_schema& scylla_sch) {
             for (const auto& col_def : scylla_sch.regular_columns()) {
                 int id = (int)col_def.ordinal_id;
                 logical_type::logical_type pq_type = pws.cell_mappings[id].pq_type;
-                if (std::holds_alternative<logical_type::UNKNOWN>(pq_type)) {
+                if (!is_supported_type(pws, id)) {
                     continue; // TODO: support all abstract types
                 }
 
@@ -513,11 +521,12 @@ public:
         const auto& key = dk.key();
         auto it = key.begin(*_pws.scylla_sch);
         for (const auto& col_def : _pws.scylla_sch->partition_key_columns()) {
-            if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[(int)col_def.ordinal_id].pq_type)) {
+            int id = (int)col_def.ordinal_id;
+            if (!is_supported_type(_pws, id)) {
                 ++it;
                 continue;
             }
-            write_cell_value((int)col_def.ordinal_id, *it);
+            write_cell_value(id, *it);
             ++it;
         }
     }
@@ -587,7 +596,7 @@ public:
         write_metadata<parts::SROW_EXTENDED_FLAGS>(0, 0, 0);
         for (const auto& col_def : _pws.scylla_sch->static_columns()) {
             int id = (int)col_def.ordinal_id;
-            if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+            if (!is_supported_type(_pws, id)) {
                 continue;
             }
             write_cell_metadata<parts::SROW_CELLS_X_FLAGS>(id, 0, 0, 0);
@@ -601,7 +610,7 @@ public:
         auto end = key.end(*_pws.scylla_sch);
         for (const auto& col_def : _pws.scylla_sch->clustering_key_columns()) {
             int id = (int)col_def.ordinal_id;
-            if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+            if (!is_supported_type(_pws, id)) {
                 if (it != end) {
                     ++it;
                 }
@@ -616,43 +625,43 @@ public:
         }
     }
     void write_cell_flags(int id, uint8_t flags) {
-        if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+        if (!is_supported_type(_pws, id)) {
             return;
         }
         write_cell_metadata<parts::ROW_CELLS_REGULAR_X_FLAGS>(id, 2, rep(), flags);
     }
     void write_cell_dt(int id, int64_t dt) {
-        if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+        if (!is_supported_type(_pws, id)) {
             return;
         }
         write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DT>(id, 3, rep(), dt);
     }
     void write_cell_dt_empty(int id) {
-        if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+        if (!is_supported_type(_pws, id)) {
             return;
         }
         write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DT>(id, 2, rep(), 0);
     }
     void write_cell_dldt(int id, int32_t dldt) {
-        if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+        if (!is_supported_type(_pws, id)) {
             return;
         }
         write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DLDT>(id, 3, rep(), dldt);
     }
     void write_cell_dldt_empty(int id) {
-        if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+        if (!is_supported_type(_pws, id)) {
             return;
         }
         write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DLDT>(id, 2, rep(), 0);
     }
     void write_cell_dttl(int id, int32_t dttl) {
-        if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+        if (!is_supported_type(_pws, id)) {
             return;
         }
         write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DTTL>(id, 3, rep(), dttl);
     }
     void write_cell_dttl_empty(int id) {
-        if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+        if (!is_supported_type(_pws, id)) {
             return;
         }
         write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DTTL>(id, 2, rep(), 0);
@@ -662,7 +671,7 @@ public:
         write_cell_value(ordinal_id, b);
     }
     void write_cell_value(int ordinal_id, bytes_view v) {
-        if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[ordinal_id].pq_type)) {
+        if (!is_supported_type(_pws, ordinal_id)) {
             return;
         }
 
@@ -847,7 +856,7 @@ public:
         }
     }
     void write_cell_value_empty(int id) {
-        if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+        if (!is_supported_type(_pws, id)) {
             return;
         }
         std::visit(parquet4seastar::overloaded {
@@ -872,7 +881,7 @@ public:
     void write_row_fill() {
         for (const auto& col_def : _pws.scylla_sch->regular_columns()) {
             int id = (int)col_def.ordinal_id;
-            if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+            if (!is_supported_type(_pws, id)) {
                 continue;
             }
             if (_cells_written[id]) {
@@ -885,7 +894,7 @@ public:
     void write_srow_fill() {
         for (const auto& col_def : _pws.scylla_sch->static_columns()) {
             int id = (int)col_def.ordinal_id;
-            if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+            if (!is_supported_type(_pws, id)) {
                 continue;
             }
             if (_cells_written[id]) {
@@ -907,7 +916,7 @@ public:
         write_metadata<parts::ROW_SHADOWABLE_DLDT>(0, 0, 0);
         for (const auto& col_def : _pws.scylla_sch->regular_columns()) {
             int id = (int)col_def.ordinal_id;
-            if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+            if (!is_supported_type(_pws, id)) {
                 continue;
             }
             std::visit(parquet4seastar::overloaded {
@@ -928,7 +937,7 @@ public:
         }
         for (const auto& col_def : _pws.scylla_sch->clustering_key_columns()) {
             int id = (int)col_def.ordinal_id;
-            if (std::holds_alternative<UNKNOWN>(_pws.cell_mappings[id].pq_type)) {
+            if (!is_supported_type(_pws, id)) {
                 continue;
             }
             std::visit(parquet4seastar::overloaded {
