@@ -1024,28 +1024,28 @@ void writer::write_cell(bytes_ostream& writer, const clustering_key_prefix* clus
 
     if (!use_row_timestamp) {
         write_delta_timestamp(writer, cell.timestamp());
-        _parquet_writer->write_cell_dt(ordinal_id, cell.timestamp());
+        _parquet_writer->write_cell_ts(ordinal_id, cell.timestamp());
     } else {
-        _parquet_writer->write_cell_dt_empty(ordinal_id);
+        _parquet_writer->write_cell_ts_empty(ordinal_id);
     }
 
     if (!use_row_ttl) {
         if (is_deleted) {
             write_delta_local_deletion_time(writer, cell.deletion_time());
-            _parquet_writer->write_cell_dldt(ordinal_id, cell.deletion_time().time_since_epoch().count());
-            _parquet_writer->write_cell_dttl_empty(ordinal_id);
+            _parquet_writer->write_cell_ldt(ordinal_id, cell.deletion_time().time_since_epoch().count());
+            _parquet_writer->write_cell_ttl_empty(ordinal_id);
         } else if (is_cell_expiring) {
             write_delta_local_deletion_time(writer, cell.expiry());
-            _parquet_writer->write_cell_dldt(ordinal_id, cell.expiry().time_since_epoch().count());
+            _parquet_writer->write_cell_ldt(ordinal_id, cell.expiry().time_since_epoch().count());
             write_delta_ttl(writer, cell.ttl());
-            _parquet_writer->write_cell_dttl_empty(ordinal_id);
+            _parquet_writer->write_cell_ttl_empty(ordinal_id);
         } else {
-            _parquet_writer->write_cell_dldt_empty(ordinal_id);
-            _parquet_writer->write_cell_dttl_empty(ordinal_id);
+            _parquet_writer->write_cell_ldt_empty(ordinal_id);
+            _parquet_writer->write_cell_ttl_empty(ordinal_id);
         }
     } else {
-            _parquet_writer->write_cell_dldt_empty(ordinal_id);
-            _parquet_writer->write_cell_dttl_empty(ordinal_id);
+            _parquet_writer->write_cell_ldt_empty(ordinal_id);
+            _parquet_writer->write_cell_ttl_empty(ordinal_id);
     }
 
     if (bool(cell_path)) {
@@ -1108,23 +1108,23 @@ void writer::write_liveness_info(bytes_ostream& writer, const row_marker& marker
     api::timestamp_type timestamp = marker.timestamp();
     _c_stats.update_timestamp(timestamp);
     write_delta_timestamp(writer, timestamp);
-    _parquet_writer->write_row_liveness_dt(timestamp);
+    _parquet_writer->write_row_liveness_ts(timestamp);
 
     auto write_expiring_liveness_info = [this, &writer] (gc_clock::duration ttl, gc_clock::time_point ldt) {
         _c_stats.update_ttl(ttl);
         _c_stats.update_local_deletion_time_and_tombstone_histogram(ldt);
         write_delta_ttl(writer, ttl);
-        _parquet_writer->write_row_liveness_dttl(gc_clock::as_int32(ttl));
+        _parquet_writer->write_row_liveness_ttl(gc_clock::as_int32(ttl));
         write_delta_local_deletion_time(writer, ldt);
-        _parquet_writer->write_row_liveness_dldt(ldt.time_since_epoch().count());
+        _parquet_writer->write_row_liveness_ldt(ldt.time_since_epoch().count());
     };
     if (!marker.is_live()) {
         write_expiring_liveness_info(gc_clock::duration(expired_liveness_ttl), marker.deletion_time());
     } else if (marker.is_expiring()) {
         write_expiring_liveness_info(marker.ttl(), marker.expiry());
     } else {
-        _parquet_writer->write_row_liveness_dttl_empty();
-        _parquet_writer->write_row_liveness_dldt_empty();
+        _parquet_writer->write_row_liveness_ttl_empty();
+        _parquet_writer->write_row_liveness_ldt_empty();
         _c_stats.update_ttl(0);
         _c_stats.update_local_deletion_time(std::numeric_limits<int32_t>::max());
     }
@@ -1186,15 +1186,15 @@ void writer::write_row_body(bytes_ostream& writer, const clustering_row& row, bo
     };
     if (row.tomb().regular()) {
         write_tombstone_and_update_stats(row.tomb().regular());
-        _parquet_writer->write_row_deletion_dmfda(row.tomb().regular().timestamp);
-        _parquet_writer->write_row_deletion_dldt(gc_clock::as_int32(row.tomb().regular().deletion_time));
+        _parquet_writer->write_row_deletion_mfda(row.tomb().regular().timestamp);
+        _parquet_writer->write_row_deletion_ldt(gc_clock::as_int32(row.tomb().regular().deletion_time));
     } else {
         _parquet_writer->write_row_deletion_empty();
     }
     if (row.tomb().is_shadowable()) {
         write_tombstone_and_update_stats(row.tomb().tomb());
-        _parquet_writer->write_row_shadowable_dmfda(row.tomb().tomb().timestamp);
-        _parquet_writer->write_row_shadowable_dldt(gc_clock::as_int32(row.tomb().tomb().deletion_time));
+        _parquet_writer->write_row_shadowable_mfda(row.tomb().tomb().timestamp);
+        _parquet_writer->write_row_shadowable_ldt(gc_clock::as_int32(row.tomb().tomb().deletion_time));
     } else {
         _parquet_writer->write_row_shadowable_empty();
     }

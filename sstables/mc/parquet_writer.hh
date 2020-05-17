@@ -101,11 +101,93 @@ map_physical_type(abstract_type::kind scylla_type) {
     return pt;
 }
 
+/*
+ * The parquet schema written by this module is designed to mirror the
+ * schema of 'mc' sstables (as documented in
+ * https://github.com/scylladb/scylla/wiki/SSTables-3.0-Data-File-Format)
+ * and looks like this:
+ *
+ * message partition {
+ *     required group header {
+ *         required group partition_key {
+ *             required $X_TYPE $X // for X in partition_key_columns
+ *             ...
+ *         }
+ *         required group deletion_time {
+ *             required int32 local_deletion_time
+ *             required int64 marked_for_delete_at
+ *         }
+ *         required group shadowable_deletion_time {
+ *             required int32 local_deletion_time
+ *             required int64 marked_for_delete_at
+ *         }
+ *     }
+ *     optional group static_row {
+ *         required int32 flags (UINT8)
+ *         required int32 extended_flags (UINT8)
+ *         required group cells {
+ *             optional group $X { // for X in static_columns()
+ *                 required int32 flags (UINT8)
+ *                 optional int64 timestamp
+ *                 optional int32 local_deletion_time
+ *                 optional int32 marked_for_delete_at
+ *                 optional $X_TYPE value
+ *             }
+ *         }
+ *     }
+ *     repeated group rows {
+ *         required group row {
+ *             required int32 flags (UINT8)
+ *             required int32 extended_flags (UINT8)
+ *             required group clustering_key {
+ *                 optional $X_TYPE $X // for X in clustering_key_columns()
+ *                 ...
+ *             }
+ *             required group regular {
+ *                 optional group $X { // for X in regular_columns()
+ *                     required int32 flags (UINT8)
+ *                     optional int64 timestamp
+ *                     optional int32 local_deletion_time
+ *                     optional int32 marked_for_delete_at
+ *                     optional $X_TYPE value
+ *                 }
+ *                 ...
+ *             }
+ *         }
+ *     }
+ * }
+ *
+ * Note that:
+ * - there is no support for non-frozen collections and range tombstones yet.
+ * - the integers written to parquet are not deltas, but full values.
+ *   Writing deltas to parquet isn't useful, because Parquet does not support
+ *   variable-length integers as a data type. Instead, parquet has its
+ *   own DELTA_BINARY_PACKED encoding for integer columns.
+ */
+
+/*
+ * Abbreviations used:
+ * TS = timestamp
+ * LDT = local deletion time
+ * MFDA = marked for delete at
+ * TTL = time to live
+ * SROW = static row
+ * DELETION = deletion time (tombstone)
+ * LIVENESS = liveness info
+ * SHADOWABLE = shadowable deletion time (shadowable tombstone)
+ * X = column name (decided at runtime, unknown at compile time, hence X)
+ */
+
+// This is an enumeration over all nodes of the schema described above.
+// It's mostly used to document / look up the constants the parquet
+// metadata of those schema nodes (repetition level, definition level,
+// parquet column index, parquet type).
 namespace parts {
 enum metadata_parts {
     HEADER,
     HEADER_PARTITION_KEY,
     HEADER_PARTITION_KEY_X,
+    HEADER_DELETION,
     HEADER_DELETION_LDT,
     HEADER_DELETION_MFDA,
     SROW,
@@ -114,33 +196,32 @@ enum metadata_parts {
     SROW_CELLS,
     SROW_CELLS_X,
     SROW_CELLS_X_FLAGS,
-    SROW_CELLS_X_DT,
-    SROW_CELLS_X_DLDT,
-    SROW_CELLS_X_DTTL,
+    SROW_CELLS_X_TS,
+    SROW_CELLS_X_LDT,
+    SROW_CELLS_X_TTL,
     SROW_CELLS_X_VALUE,
     ROW,
     ROW_FLAGS,
     ROW_EXTENDED_FLAGS,
     ROW_LIVENESS,
-    ROW_LIVENESS_DT,
-    ROW_LIVENESS_DTTL,
-    ROW_LIVENESS_DLDT,
+    ROW_LIVENESS_TS,
+    ROW_LIVENESS_TTL,
+    ROW_LIVENESS_LDT,
     ROW_DELETION,
-    ROW_DELETION_DMFDA,
-    ROW_DELETION_DLDT,
+    ROW_DELETION_MFDA,
+    ROW_DELETION_LDT,
     ROW_SHADOWABLE,
-    ROW_SHADOWABLE_DMFDA,
-    ROW_SHADOWABLE_DLDT,
-    ROW_CELLS,
-    ROW_CELLS_KEY,
-    ROW_CELLS_KEY_X,
-    ROW_CELLS_REGULAR,
-    ROW_CELLS_REGULAR_X,
-    ROW_CELLS_REGULAR_X_FLAGS,
-    ROW_CELLS_REGULAR_X_DT,
-    ROW_CELLS_REGULAR_X_DLDT,
-    ROW_CELLS_REGULAR_X_DTTL,
-    ROW_CELLS_REGULAR_X_VALUE,
+    ROW_SHADOWABLE_MFDA,
+    ROW_SHADOWABLE_LDT,
+    ROW_KEY, // clustering key
+    ROW_KEY_X,
+    ROW_REGULAR,
+    ROW_REGULAR_X,
+    ROW_REGULAR_X_FLAGS,
+    ROW_REGULAR_X_TS,
+    ROW_REGULAR_X_LDT,
+    ROW_REGULAR_X_TTL,
+    ROW_REGULAR_X_VALUE,
     ENUM_SIZE,
 };
 } // namespace parts
@@ -155,6 +236,7 @@ constexpr schema_mapping schema_mappings[parts::ENUM_SIZE] = {
     {0, 0, UNKNOWN{}}, // HEADER,
     {0, 0, UNKNOWN{}}, // HEADER_PARTITION_KEY,
     {0, 0, UNKNOWN{}}, // HEADER_PARTITION_KEY_X,
+    {0, 0, UNKNOWN{}}, // HEADER_DELETION,
     {0, 0, INT32{}}, // HEADER_DELETION_LDT,
     {0, 0, INT64{}}, // HEADER_DELETION_MFDA,
     {1, 0, UNKNOWN{}}, // SROW,
@@ -163,33 +245,32 @@ constexpr schema_mapping schema_mappings[parts::ENUM_SIZE] = {
     {1, 0, UNKNOWN{}}, // SROW_CELLS,
     {2, 0, UNKNOWN{}}, // SROW_CELLS_X,
     {2, 0, UNKNOWN{}}, // SROW_CELLS_X_FLAGS,
-    {3, 0, INT64{}}, // SROW_CELLS_X_DT,
-    {3, 0, INT32{}}, // SROW_CELLS_X_DLDT,
-    {3, 0, INT32{}}, // SROW_CELLS_X_DTTL,
+    {3, 0, INT64{}}, // SROW_CELLS_X_TS,
+    {3, 0, INT32{}}, // SROW_CELLS_X_LDT,
+    {3, 0, INT32{}}, // SROW_CELLS_X_TTL,
     {3, 0, UNKNOWN{}}, // SROW_CELLS_X_VALUE,
     {1, 1, UNKNOWN{}}, // ROW,
     {1, 1, UINT8{}}, // ROW_FLAGS,
     {2, 1, UINT8{}}, // ROW_EXTENDED_FLAGS,
     {2, 1, UNKNOWN{}}, // ROW_LIVENESS,
-    {2, 1, INT64{}}, // ROW_LIVENESS_DT,
-    {3, 1, INT32{}}, // ROW_LIVENESS_DTTL,
-    {3, 1, INT32{}}, // ROW_LIVENESS_DLDT,
+    {2, 1, INT64{}}, // ROW_LIVENESS_TS,
+    {3, 1, INT32{}}, // ROW_LIVENESS_TTL,
+    {3, 1, INT32{}}, // ROW_LIVENESS_LDT,
     {2, 1, UNKNOWN{}}, // ROW_DELETION,
-    {2, 1, INT64{}}, // ROW_DELETION_DMFDA,
-    {2, 1, INT32{}}, // ROW_DELETION_DLDT,
+    {2, 1, INT64{}}, // ROW_DELETION_MFDA,
+    {2, 1, INT32{}}, // ROW_DELETION_LDT,
     {2, 1, UNKNOWN{}}, // ROW_SHADOWABLE,
-    {2, 1, INT64{}}, // ROW_SHADOWABLE_DMFDA,
-    {2, 1, INT32{}}, // ROW_SHADOWABLE_DLDT,
-    {1, 1, UNKNOWN{}}, // ROW_CELLS,
-    {1, 1, UNKNOWN{}}, // ROW_CELLS_KEY,
-    {2, 1, UNKNOWN{}}, // ROW_CELLS_KEY_X,
-    {1, 1, UNKNOWN{}}, // ROW_CELLS_REGULAR,
-    {2, 1, UNKNOWN{}}, // ROW_CELLS_REGULAR_X,
-    {2, 1, UINT8{}}, // ROW_CELLS_REGULAR_X_FLAGS,
-    {3, 1, INT64{}}, // ROW_CELLS_REGULAR_X_DT,
-    {3, 1, INT32{}}, // ROW_CELLS_REGULAR_X_DLDT,
-    {3, 1, INT32{}}, // ROW_CELLS_REGULAR_X_DTTL,
-    {3, 1, UNKNOWN{}}, // ROW_CELLS_REGULAR_X_VALUE,
+    {2, 1, INT64{}}, // ROW_SHADOWABLE_MFDA,
+    {2, 1, INT32{}}, // ROW_SHADOWABLE_LDT,
+    {1, 1, UNKNOWN{}}, // ROW_KEY,
+    {2, 1, UNKNOWN{}}, // ROW_KEY_X,
+    {1, 1, UNKNOWN{}}, // ROW_REGULAR,
+    {2, 1, UNKNOWN{}}, // ROW_REGULAR_X,
+    {2, 1, UINT8{}}, // ROW_REGULAR_X_FLAGS,
+    {3, 1, INT64{}}, // ROW_REGULAR_X_TS,
+    {3, 1, INT32{}}, // ROW_REGULAR_X_LDT,
+    {3, 1, INT32{}}, // ROW_REGULAR_X_TTL,
+    {3, 1, UNKNOWN{}}, // ROW_REGULAR_X_VALUE,
 };
 
 struct cell_mapping {
@@ -197,9 +278,9 @@ struct cell_mapping {
     parquet4seastar::logical_type::logical_type pq_type;
     // Fields below are unused for keys
     int flags;
-    int dt;
-    int dldt;
-    int dttl;
+    int ts;
+    int ldt;
+    int ttl;
 };
 
 struct parquet_writer_schema {
@@ -314,14 +395,14 @@ scylla_schema_to_parquet_writer_schema(const scylla_schema& scylla_sch) {
                     "flags", false, schema_mappings[SROW_CELLS_X_FLAGS].pq_type));
             pws.cell_mappings[id].flags = leaf_idx++;
             srow_cells_X.fields.push_back(make_leaf(
-                    "delta_timestamp", true, schema_mappings[SROW_CELLS_X_DT].pq_type));
-            pws.cell_mappings[id].dt = leaf_idx++;
+                    "delta_timestamp", true, schema_mappings[SROW_CELLS_X_TS].pq_type));
+            pws.cell_mappings[id].ts = leaf_idx++;
             srow_cells_X.fields.push_back(make_leaf(
-                    "delta_local_deletion_time", true, schema_mappings[SROW_CELLS_X_DLDT].pq_type));
-            pws.cell_mappings[id].dldt = leaf_idx++;
+                    "delta_local_deletion_time", true, schema_mappings[SROW_CELLS_X_LDT].pq_type));
+            pws.cell_mappings[id].ldt = leaf_idx++;
             srow_cells_X.fields.push_back(make_leaf(
-                    "delta_ttl", true, schema_mappings[SROW_CELLS_X_DTTL].pq_type));
-            pws.cell_mappings[id].dttl = leaf_idx++;
+                    "delta_ttl", true, schema_mappings[SROW_CELLS_X_TTL].pq_type));
+            pws.cell_mappings[id].ttl = leaf_idx++;
             srow_cells_X.fields.push_back(make_leaf(
                     "value", true, pq_type));
             pws.cell_mappings[id].value = leaf_idx++;
@@ -345,25 +426,25 @@ scylla_schema_to_parquet_writer_schema(const scylla_schema& scylla_sch) {
         {
             auto row_liveness = make_struct("liveness_info", true);
             row_liveness.fields.push_back(make_leaf(
-                    "delta_timestamp", false, schema_mappings[ROW_LIVENESS_DT].pq_type));
-            pws.metadata_mappings[ROW_LIVENESS_DT] = leaf_idx++;
+                    "delta_timestamp", false, schema_mappings[ROW_LIVENESS_TS].pq_type));
+            pws.metadata_mappings[ROW_LIVENESS_TS] = leaf_idx++;
             row_liveness.fields.push_back(make_leaf(
-                    "delta_ttl", true, schema_mappings[ROW_LIVENESS_DTTL].pq_type));
-            pws.metadata_mappings[ROW_LIVENESS_DTTL] = leaf_idx++;
+                    "delta_ttl", true, schema_mappings[ROW_LIVENESS_TTL].pq_type));
+            pws.metadata_mappings[ROW_LIVENESS_TTL] = leaf_idx++;
             row_liveness.fields.push_back(make_leaf(
-                    "delta_local_deletion_time", true, schema_mappings[ROW_LIVENESS_DLDT].pq_type));
-            pws.metadata_mappings[ROW_LIVENESS_DLDT] = leaf_idx++;
+                    "delta_local_deletion_time", true, schema_mappings[ROW_LIVENESS_LDT].pq_type));
+            pws.metadata_mappings[ROW_LIVENESS_LDT] = leaf_idx++;
             row.fields.push_back(std::move(row_liveness));
         }
         // row_deletion
         {
             auto row_deletion = make_struct("deletion_time", true);
             row_deletion.fields.push_back(make_leaf(
-                    "delta_marked_for_delete_at", false, schema_mappings[ROW_DELETION_DMFDA].pq_type));
-            pws.metadata_mappings[ROW_DELETION_DMFDA] = leaf_idx++;
+                    "delta_marked_for_delete_at", false, schema_mappings[ROW_DELETION_MFDA].pq_type));
+            pws.metadata_mappings[ROW_DELETION_MFDA] = leaf_idx++;
             row_deletion.fields.push_back(make_leaf(
-                    "delta_local_deletion_time", false, schema_mappings[ROW_DELETION_DLDT].pq_type));
-            pws.metadata_mappings[ROW_DELETION_DLDT] = leaf_idx++;
+                    "delta_local_deletion_time", false, schema_mappings[ROW_DELETION_LDT].pq_type));
+            pws.metadata_mappings[ROW_DELETION_LDT] = leaf_idx++;
             row.fields.push_back(std::move(row_deletion));
         }
         // row_shadowable
@@ -372,11 +453,11 @@ scylla_schema_to_parquet_writer_schema(const scylla_schema& scylla_sch) {
         {
             auto row_shadowable = make_struct("shadowable_deletion_time", true);
             row_shadowable.fields.push_back(make_leaf(
-                    "delta_marked_for_delete_at", false, schema_mappings[ROW_SHADOWABLE_DMFDA].pq_type));
-            pws.metadata_mappings[ROW_SHADOWABLE_DMFDA] = leaf_idx++;
+                    "delta_marked_for_delete_at", false, schema_mappings[ROW_SHADOWABLE_MFDA].pq_type));
+            pws.metadata_mappings[ROW_SHADOWABLE_MFDA] = leaf_idx++;
             row_shadowable.fields.push_back(make_leaf(
-                    "delta_local_deletion_time", false, schema_mappings[ROW_SHADOWABLE_DLDT].pq_type));
-            pws.metadata_mappings[ROW_SHADOWABLE_DLDT] = leaf_idx++;
+                    "delta_local_deletion_time", false, schema_mappings[ROW_SHADOWABLE_LDT].pq_type));
+            pws.metadata_mappings[ROW_SHADOWABLE_LDT] = leaf_idx++;
             row.fields.push_back(std::move(row_shadowable));
         }
         // row_cells_key
@@ -408,17 +489,17 @@ scylla_schema_to_parquet_writer_schema(const scylla_schema& scylla_sch) {
 
                 auto row_cells_regular_X = make_struct(col_def.name_as_text(), true);
                 row_cells_regular_X.fields.push_back(make_leaf(
-                        "flags", false, schema_mappings[ROW_CELLS_REGULAR_X_FLAGS].pq_type));
+                        "flags", false, schema_mappings[ROW_REGULAR_X_FLAGS].pq_type));
                 pws.cell_mappings[id].flags = leaf_idx++;
                 row_cells_regular_X.fields.push_back(make_leaf(
-                        "delta_timestamp", true, schema_mappings[ROW_CELLS_REGULAR_X_DT].pq_type));
-                pws.cell_mappings[id].dt = leaf_idx++;
+                        "delta_timestamp", true, schema_mappings[ROW_REGULAR_X_TS].pq_type));
+                pws.cell_mappings[id].ts = leaf_idx++;
                 row_cells_regular_X.fields.push_back(make_leaf(
-                        "delta_local_deletion_time", true, schema_mappings[ROW_CELLS_REGULAR_X_DLDT].pq_type));
-                pws.cell_mappings[id].dldt = leaf_idx++;
+                        "delta_local_deletion_time", true, schema_mappings[ROW_REGULAR_X_LDT].pq_type));
+                pws.cell_mappings[id].ldt = leaf_idx++;
                 row_cells_regular_X.fields.push_back(make_leaf(
-                        "delta_ttl", true, schema_mappings[ROW_CELLS_REGULAR_X_DTTL].pq_type));
-                pws.cell_mappings[id].dttl = leaf_idx++;
+                        "delta_ttl", true, schema_mappings[ROW_REGULAR_X_TTL].pq_type));
+                pws.cell_mappings[id].ttl = leaf_idx++;
                 row_cells_regular_X.fields.push_back(make_leaf(
                         "value", true, pq_type));
                 pws.cell_mappings[id].value = leaf_idx++;
@@ -486,20 +567,20 @@ public:
         int writer_id;
         switch (Part) {
             case parts::SROW_CELLS_X_FLAGS:
-            case parts::ROW_CELLS_REGULAR_X_FLAGS:
+            case parts::ROW_REGULAR_X_FLAGS:
                 writer_id = c.flags;
                 break;
-            case parts::SROW_CELLS_X_DT:
-            case parts::ROW_CELLS_REGULAR_X_DT:
-                writer_id = c.dt;
+            case parts::SROW_CELLS_X_TS:
+            case parts::ROW_REGULAR_X_TS:
+                writer_id = c.ts;
                 break;
-            case parts::SROW_CELLS_X_DLDT:
-            case parts::ROW_CELLS_REGULAR_X_DLDT:
-                writer_id = c.dldt;
+            case parts::SROW_CELLS_X_LDT:
+            case parts::ROW_REGULAR_X_LDT:
+                writer_id = c.ldt;
                 break;
-            case parts::SROW_CELLS_X_DTTL:
-            case parts::ROW_CELLS_REGULAR_X_DTTL:
-                writer_id = c.dttl;
+            case parts::SROW_CELLS_X_TTL:
+            case parts::ROW_REGULAR_X_TTL:
+                writer_id = c.ttl;
                 break;
             default:
                 throw std::runtime_error("BUG: Not a cell metadata.");
@@ -551,45 +632,45 @@ public:
             write_metadata<parts::ROW_EXTENDED_FLAGS>(1, rep(), 0);
         }
     }
-    void write_row_liveness_dt(int64_t dt) {
-        write_metadata<parts::ROW_LIVENESS_DT>(2, rep(), dt);
+    void write_row_liveness_ts(int64_t ts) {
+        write_metadata<parts::ROW_LIVENESS_TS>(2, rep(), ts);
     }
-    void write_row_liveness_dttl(int32_t dttl) {
-        write_metadata<parts::ROW_LIVENESS_DTTL>(3, rep(), dttl);
+    void write_row_liveness_ttl(int32_t ttl) {
+        write_metadata<parts::ROW_LIVENESS_TTL>(3, rep(), ttl);
     }
-    void write_row_liveness_dttl_empty() {
-        write_metadata<parts::ROW_LIVENESS_DTTL>(2, rep(), 0);
+    void write_row_liveness_ttl_empty() {
+        write_metadata<parts::ROW_LIVENESS_TTL>(2, rep(), 0);
     }
-    void write_row_liveness_dldt(int32_t dldt) {
-        write_metadata<parts::ROW_LIVENESS_DLDT>(3, rep(), dldt);
+    void write_row_liveness_ldt(int32_t ldt) {
+        write_metadata<parts::ROW_LIVENESS_LDT>(3, rep(), ldt);
     }
-    void write_row_liveness_dldt_empty() {
-        write_metadata<parts::ROW_LIVENESS_DLDT>(2, rep(), 0);
+    void write_row_liveness_ldt_empty() {
+        write_metadata<parts::ROW_LIVENESS_LDT>(2, rep(), 0);
     }
     void write_row_liveness_empty() {
-        write_metadata<parts::ROW_LIVENESS_DT>(1, rep(), 0);
-        write_metadata<parts::ROW_LIVENESS_DLDT>(1, rep(), 0);
-        write_metadata<parts::ROW_LIVENESS_DTTL>(1, rep(), 0);
+        write_metadata<parts::ROW_LIVENESS_TS>(1, rep(), 0);
+        write_metadata<parts::ROW_LIVENESS_LDT>(1, rep(), 0);
+        write_metadata<parts::ROW_LIVENESS_TTL>(1, rep(), 0);
     }
-    void write_row_deletion_dmfda(int64_t dmfda) {
-        write_metadata<parts::ROW_DELETION_DMFDA>(2, rep(), dmfda);
+    void write_row_deletion_mfda(int64_t mfda) {
+        write_metadata<parts::ROW_DELETION_MFDA>(2, rep(), mfda);
     }
-    void write_row_deletion_dldt(int32_t dldt) {
-        write_metadata<parts::ROW_DELETION_DLDT>(2, rep(), dldt);
+    void write_row_deletion_ldt(int32_t ldt) {
+        write_metadata<parts::ROW_DELETION_LDT>(2, rep(), ldt);
     }
     void write_row_deletion_empty() {
-        write_metadata<parts::ROW_DELETION_DMFDA>(1, rep(), 0);
-        write_metadata<parts::ROW_DELETION_DLDT>(1, rep(), 0);
+        write_metadata<parts::ROW_DELETION_MFDA>(1, rep(), 0);
+        write_metadata<parts::ROW_DELETION_LDT>(1, rep(), 0);
     }
-    void write_row_shadowable_dmfda(int64_t dmfda) {
-        write_metadata<parts::ROW_SHADOWABLE_DMFDA>(2, rep(), dmfda);
+    void write_row_shadowable_mfda(int64_t mfda) {
+        write_metadata<parts::ROW_SHADOWABLE_MFDA>(2, rep(), mfda);
     }
-    void write_row_shadowable_dldt(int32_t dldt) {
-        write_metadata<parts::ROW_SHADOWABLE_DLDT>(2, rep(), dldt);
+    void write_row_shadowable_ldt(int32_t ldt) {
+        write_metadata<parts::ROW_SHADOWABLE_LDT>(2, rep(), ldt);
     }
     void write_row_shadowable_empty() {
-        write_metadata<parts::ROW_SHADOWABLE_DMFDA>(1, rep(), 0);
-        write_metadata<parts::ROW_SHADOWABLE_DLDT>(1, rep(), 0);
+        write_metadata<parts::ROW_SHADOWABLE_MFDA>(1, rep(), 0);
+        write_metadata<parts::ROW_SHADOWABLE_LDT>(1, rep(), 0);
     }
     void write_srow_empty() {
         write_metadata<parts::SROW_FLAGS>(0, 0, 0);
@@ -600,9 +681,9 @@ public:
                 continue;
             }
             write_cell_metadata<parts::SROW_CELLS_X_FLAGS>(id, 0, 0, 0);
-            write_cell_metadata<parts::SROW_CELLS_X_DT>(id, 0, 0, 0);
-            write_cell_metadata<parts::SROW_CELLS_X_DLDT>(id, 0, 0, 0);
-            write_cell_metadata<parts::SROW_CELLS_X_DTTL>(id, 0, 0, 0);
+            write_cell_metadata<parts::SROW_CELLS_X_TS>(id, 0, 0, 0);
+            write_cell_metadata<parts::SROW_CELLS_X_LDT>(id, 0, 0, 0);
+            write_cell_metadata<parts::SROW_CELLS_X_TTL>(id, 0, 0, 0);
         }
     }
     void write_clustering_key(const clustering_key_prefix& key) {
@@ -628,43 +709,43 @@ public:
         if (!is_supported_type(_pws, id)) {
             return;
         }
-        write_cell_metadata<parts::ROW_CELLS_REGULAR_X_FLAGS>(id, 2, rep(), flags);
+        write_cell_metadata<parts::ROW_REGULAR_X_FLAGS>(id, 2, rep(), flags);
     }
-    void write_cell_dt(int id, int64_t dt) {
+    void write_cell_ts(int id, int64_t ts) {
         if (!is_supported_type(_pws, id)) {
             return;
         }
-        write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DT>(id, 3, rep(), dt);
+        write_cell_metadata<parts::ROW_REGULAR_X_TS>(id, 3, rep(), ts);
     }
-    void write_cell_dt_empty(int id) {
+    void write_cell_ts_empty(int id) {
         if (!is_supported_type(_pws, id)) {
             return;
         }
-        write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DT>(id, 2, rep(), 0);
+        write_cell_metadata<parts::ROW_REGULAR_X_TS>(id, 2, rep(), 0);
     }
-    void write_cell_dldt(int id, int32_t dldt) {
+    void write_cell_ldt(int id, int32_t ldt) {
         if (!is_supported_type(_pws, id)) {
             return;
         }
-        write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DLDT>(id, 3, rep(), dldt);
+        write_cell_metadata<parts::ROW_REGULAR_X_LDT>(id, 3, rep(), ldt);
     }
-    void write_cell_dldt_empty(int id) {
+    void write_cell_ldt_empty(int id) {
         if (!is_supported_type(_pws, id)) {
             return;
         }
-        write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DLDT>(id, 2, rep(), 0);
+        write_cell_metadata<parts::ROW_REGULAR_X_LDT>(id, 2, rep(), 0);
     }
-    void write_cell_dttl(int id, int32_t dttl) {
+    void write_cell_ttl(int id, int32_t ttl) {
         if (!is_supported_type(_pws, id)) {
             return;
         }
-        write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DTTL>(id, 3, rep(), dttl);
+        write_cell_metadata<parts::ROW_REGULAR_X_TTL>(id, 3, rep(), ttl);
     }
-    void write_cell_dttl_empty(int id) {
+    void write_cell_ttl_empty(int id) {
         if (!is_supported_type(_pws, id)) {
             return;
         }
-        write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DTTL>(id, 2, rep(), 0);
+        write_cell_metadata<parts::ROW_REGULAR_X_TTL>(id, 2, rep(), 0);
     }
     void write_cell_value(int ordinal_id, atomic_cell_value_view v) {
         bytes b = v.linearize();
@@ -690,11 +771,11 @@ public:
             def = schema_mappings[parts::SROW_CELLS_X_VALUE].def;
             rep = schema_mappings[parts::SROW_CELLS_X_VALUE].rep;
         } else if (col_def.is_clustering_key()) {
-            def = schema_mappings[parts::ROW_CELLS_KEY_X].def;
-            rep = schema_mappings[parts::ROW_CELLS_KEY_X].rep;
+            def = schema_mappings[parts::ROW_KEY_X].def;
+            rep = schema_mappings[parts::ROW_KEY_X].rep;
         } else if (col_def.is_regular()) {
-            def = schema_mappings[parts::ROW_CELLS_REGULAR_X_VALUE].def;
-            rep = schema_mappings[parts::ROW_CELLS_REGULAR_X_VALUE].rep;
+            def = schema_mappings[parts::ROW_REGULAR_X_VALUE].def;
+            rep = schema_mappings[parts::ROW_REGULAR_X_VALUE].rep;
         }
 
         try {
@@ -873,10 +954,10 @@ public:
     }
     void write_cell_empty(int id) {
         write_cell_value_empty(id);
-        write_cell_metadata<parts::ROW_CELLS_REGULAR_X_FLAGS>(id, 1, rep(), 0);
-        write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DT>(id, 1, rep(), 0);
-        write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DLDT>(id, 1, rep(), 0);
-        write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DTTL>(id, 1, rep(), 0);
+        write_cell_metadata<parts::ROW_REGULAR_X_FLAGS>(id, 1, rep(), 0);
+        write_cell_metadata<parts::ROW_REGULAR_X_TS>(id, 1, rep(), 0);
+        write_cell_metadata<parts::ROW_REGULAR_X_LDT>(id, 1, rep(), 0);
+        write_cell_metadata<parts::ROW_REGULAR_X_TTL>(id, 1, rep(), 0);
     }
     void write_row_fill() {
         for (const auto& col_def : _pws.scylla_sch->regular_columns()) {
@@ -907,13 +988,13 @@ public:
     void write_rows_empty() {
         write_metadata<parts::ROW_FLAGS>(0, 0, 0);
         write_metadata<parts::ROW_EXTENDED_FLAGS>(0, 0, 0);
-        write_metadata<parts::ROW_LIVENESS_DT>(0, 0, 0);
-        write_metadata<parts::ROW_LIVENESS_DLDT>(0, 0, 0);
-        write_metadata<parts::ROW_LIVENESS_DTTL>(0, 0, 0);
-        write_metadata<parts::ROW_DELETION_DMFDA>(0, 0, 0);
-        write_metadata<parts::ROW_DELETION_DLDT>(0, 0, 0);
-        write_metadata<parts::ROW_SHADOWABLE_DMFDA>(0, 0, 0);
-        write_metadata<parts::ROW_SHADOWABLE_DLDT>(0, 0, 0);
+        write_metadata<parts::ROW_LIVENESS_TS>(0, 0, 0);
+        write_metadata<parts::ROW_LIVENESS_LDT>(0, 0, 0);
+        write_metadata<parts::ROW_LIVENESS_TTL>(0, 0, 0);
+        write_metadata<parts::ROW_DELETION_MFDA>(0, 0, 0);
+        write_metadata<parts::ROW_DELETION_LDT>(0, 0, 0);
+        write_metadata<parts::ROW_SHADOWABLE_MFDA>(0, 0, 0);
+        write_metadata<parts::ROW_SHADOWABLE_LDT>(0, 0, 0);
         for (const auto& col_def : _pws.scylla_sch->regular_columns()) {
             int id = (int)col_def.ordinal_id;
             if (!is_supported_type(_pws, id)) {
@@ -930,10 +1011,10 @@ public:
                     // unreachable
                 },
             }, _pws.cell_mappings[id].pq_type);
-            write_cell_metadata<parts::ROW_CELLS_REGULAR_X_FLAGS>(id, 0, 0, 0);
-            write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DT>(id, 0, 0, 0);
-            write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DLDT>(id, 0, 0, 0);
-            write_cell_metadata<parts::ROW_CELLS_REGULAR_X_DTTL>(id, 0, 0, 0);
+            write_cell_metadata<parts::ROW_REGULAR_X_FLAGS>(id, 0, 0, 0);
+            write_cell_metadata<parts::ROW_REGULAR_X_TS>(id, 0, 0, 0);
+            write_cell_metadata<parts::ROW_REGULAR_X_LDT>(id, 0, 0, 0);
+            write_cell_metadata<parts::ROW_REGULAR_X_TTL>(id, 0, 0, 0);
         }
         for (const auto& col_def : _pws.scylla_sch->clustering_key_columns()) {
             int id = (int)col_def.ordinal_id;
