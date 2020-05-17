@@ -764,18 +764,23 @@ public:
         int def;
         int rep;
         int writer_id = _pws.cell_mappings[ordinal_id].value;
-        if (col_def.is_partition_key()) {
+        switch (col_def.kind) {
+        case column_kind::partition_key:
             def = schema_mappings[parts::HEADER_PARTITION_KEY_X].def;
             rep = schema_mappings[parts::HEADER_PARTITION_KEY_X].rep;
-        } else if (col_def.is_static()) {
+            break;
+        case column_kind::static_column:
             def = schema_mappings[parts::SROW_CELLS_X_VALUE].def;
             rep = schema_mappings[parts::SROW_CELLS_X_VALUE].rep;
-        } else if (col_def.is_clustering_key()) {
+            break;
+        case column_kind::clustering_key:
             def = schema_mappings[parts::ROW_KEY_X].def;
             rep = schema_mappings[parts::ROW_KEY_X].rep;
-        } else if (col_def.is_regular()) {
+            break;
+        case column_kind::regular_column:
             def = schema_mappings[parts::ROW_REGULAR_X_VALUE].def;
             rep = schema_mappings[parts::ROW_REGULAR_X_VALUE].rep;
+            break;
         }
 
         try {
@@ -783,7 +788,8 @@ public:
 
             switch (col_def.type->get_kind()) {
             case kind::counter:
-            case kind::empty: break;
+            case kind::empty:
+                break;
 
             case kind::date: {
                 auto& w = _writer->column<map_physical_type(kind::date)>(writer_id);
@@ -948,7 +954,7 @@ public:
                 w.put(1, rep(), input_type{});
             },
             [&] (const parquet4seastar::logical_type::INT96&) {
-                // unreachable
+                assert(false && "INT96 must not be chosen as a writer type");
             },
         }, _pws.cell_mappings[id].pq_type);
     }
@@ -1008,7 +1014,7 @@ public:
                     w.put(0, 0, input_type{});
                 },
                 [&] (const parquet4seastar::logical_type::INT96&) {
-                    // unreachable
+                    assert(false && "INT96 must not be chosen as a writer type");
                 },
             }, _pws.cell_mappings[id].pq_type);
             write_cell_metadata<parts::ROW_REGULAR_X_FLAGS>(id, 0, 0, 0);
@@ -1029,7 +1035,7 @@ public:
                     w.put(0, 0, input_type{});
                 },
                 [&] (const parquet4seastar::logical_type::INT96&) {
-                    // unreachable
+                    assert(false && "INT96 must not be chosen as a writer type");
                 },
             }, _pws.cell_mappings[id].pq_type);
         }
