@@ -310,6 +310,8 @@ scylla_schema_to_parquet_writer_schema(const scylla_schema& scylla_sch) {
         leaf.name = std::move(name);
         leaf.optional = optional;
         leaf.logical_type = lt;
+        leaf.compression = parquet4seastar::format::CompressionCodec::GZIP;
+        leaf.encoding = parquet4seastar::format::Encoding::RLE_DICTIONARY;
         return leaf;
     };
 
