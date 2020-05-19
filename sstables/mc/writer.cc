@@ -848,7 +848,8 @@ void writer::init_file_writers() {
                 _schema.get_compressor_params()));
     }
     _index_writer = std::make_unique<file_writer>(std::move(_sst._index_file), options);
-    _parquet_writer = parquet_writer::parquet_writer::open(_schema);
+    _parquet_writer = parquet_writer::parquet_writer::open(
+            _sst.component_basename(component_type::Data), _schema);
 }
 
 std::unique_ptr<file_writer> writer::close_writer(std::unique_ptr<file_writer>& w) {

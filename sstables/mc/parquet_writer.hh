@@ -550,12 +550,12 @@ public:
     ~parquet_writer() {
         close();
     }
-    static std::unique_ptr<parquet_writer> open(const scylla_schema& schema) {
+    static std::unique_ptr<parquet_writer> open(std::string sst_filename, const scylla_schema& schema) {
         std::unique_ptr<parquet_writer> ret(new parquet_writer());
 
-        std::string filename_base = schema.cf_name().c_str();
-        std::replace(filename_base.begin(), filename_base.end(), '/', '-');
-        std::string parquet_file = "/tmp/scylla-parquet/" + filename_base + ".parquet.test";
+        std::string cf_name = schema.cf_name().c_str();
+        std::replace(cf_name.begin(), cf_name.end(), '/', '-');
+        std::string parquet_file = "/tmp/scylla-parquet/" + cf_name + "." + sst_filename + ".parquet";
         ret->_pws = scylla_schema_to_parquet_writer_schema(schema);
         ret->_writer = parquet4seastar::file_writer::open(
                 parquet_file, ret->_pws.p4s_schema).get0();
