@@ -522,6 +522,9 @@ class parquet_writer {
     std::vector<bool> _cells_written;
     bool _written_static_row = false;
     bool _written_row = false;
+    int64_t _estimated_row_group_size = 0;
+    static constexpr int64_t PAGE_FLUSH_THRESHOLD = 32 * 1024;
+    static constexpr int64_t ROW_GROUP_FLUSH_THRESHOLD = 64 * 1024 * 1024;
 private:
     parquet_writer() {};
     bool is_current_row_static() {
@@ -532,6 +535,15 @@ private:
             return 0;
         } else {
             return _written_row ? 1 : 0;
+        }
+    }
+    template <typename Writer, typename Value>
+    void put(Writer& w, int def, int rep, Value v) {
+        w.put(def, rep, v);
+        if (w.current_page_max_size() > PAGE_FLUSH_THRESHOLD) {
+            _estimated_row_group_size -= w.estimated_chunk_size();
+            w.flush_page();
+            _estimated_row_group_size += w.estimated_chunk_size();
         }
     }
 public:
@@ -560,7 +572,7 @@ public:
         constexpr parquet4seastar::format::Type::type pt =
                 std::visit([] (const auto& x) { return x.physical_type; }, lt);
         auto& w = _writer->column<pt>(_pws.metadata_mappings[Part]);
-        w.put(def, rep, v);
+        put(w, def, rep, v);
     }
     template <parts::metadata_parts Part, typename ValueType>
     void write_cell_metadata(int ordinal_id, int def, int rep, ValueType v) {
@@ -591,7 +603,7 @@ public:
         constexpr parquet4seastar::format::Type::type pt =
                 std::visit([] (const auto& x) { return x.physical_type; }, lt);
         auto& w = _writer->column<pt>(writer_id);
-        w.put(def, rep, v);
+        put(w, def, rep, v);
     }
     void write_header_ldt(int32_t x) {
         write_metadata<parts::HEADER_DELETION_LDT>(0, 0, x);
@@ -794,146 +806,146 @@ public:
 
             case kind::date: {
                 auto& w = _writer->column<map_physical_type(kind::date)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::decimal: {
                 auto& w = _writer->column<map_physical_type(kind::decimal)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::duration: {
                 auto& w = _writer->column<map_physical_type(kind::duration)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::inet: {
                 auto& w = _writer->column<map_physical_type(kind::inet)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::list: {
                 auto& w = _writer->column<map_physical_type(kind::list)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::map: {
                 auto& w = _writer->column<map_physical_type(kind::map)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::reversed: {
                 auto& w = _writer->column<map_physical_type(kind::reversed)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::set: {
                 auto& w = _writer->column<map_physical_type(kind::set)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::timeuuid: {
                 auto& w = _writer->column<map_physical_type(kind::timeuuid)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::tuple: {
                 auto& w = _writer->column<map_physical_type(kind::tuple)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::user: {
                 auto& w = _writer->column<map_physical_type(kind::user)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::uuid: {
                 auto& w = _writer->column<map_physical_type(kind::uuid)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::varint: {
                 auto& w = _writer->column<map_physical_type(kind::varint)>(writer_id);
-                w.put(def, rep, cast_bytes_view(v));
+                put(w, def, rep, cast_bytes_view(v));
                 break;
             }
             case kind::ascii: {
                 auto& w = _writer->column<map_physical_type(kind::ascii)>(writer_id);
                 auto typed_value = value_cast<sstring>(dv);
-                w.put(def, rep, sstring_to_bytes_view(typed_value));
+                put(w, def, rep, sstring_to_bytes_view(typed_value));
                 break;
             }
             case kind::boolean: {
                 auto& w = _writer->column<map_physical_type(kind::boolean)>(writer_id);
                 auto typed_value = value_cast<bool>(dv);
-                w.put(def, rep, typed_value);
+                put(w, def, rep, typed_value);
                 break;
             }
             case kind::byte: {
                 auto& w = _writer->column<map_physical_type(kind::byte)>(writer_id);
                 auto typed_value = value_cast<int8_t>(dv);
-                w.put(def, rep, typed_value);
+                put(w, def, rep, typed_value);
                 break;
             }
             case kind::bytes: {
                 auto& w = _writer->column<map_physical_type(kind::bytes)>(writer_id);
                 auto typed_value = value_cast<bytes>(dv);
-                w.put(def, rep, cast_bytes_view(typed_value));
+                put(w, def, rep, cast_bytes_view(typed_value));
                 break;
             }
             case kind::double_kind: {
                 auto& w = _writer->column<map_physical_type(kind::double_kind)>(writer_id);
                 auto typed_value = value_cast<double>(dv);
-                w.put(def, rep, typed_value);
+                put(w, def, rep, typed_value);
                 break;
             }
             case kind::float_kind:{
                 auto& w = _writer->column<map_physical_type(kind::float_kind)>(writer_id);
                 auto typed_value = value_cast<float>(dv);
-                w.put(def, rep, typed_value);
+                put(w, def, rep, typed_value);
                 break;
             }
             case kind::int32: {
                 auto& w = _writer->column<map_physical_type(kind::int32)>(writer_id);
                 auto typed_value = value_cast<int32_t>(dv);
-                w.put(def, rep, typed_value);
+                put(w, def, rep, typed_value);
                 break;
             }
             case kind::long_kind: {
                 auto& w = _writer->column<map_physical_type(kind::long_kind)>(writer_id);
                 auto typed_value = value_cast<int64_t>(dv);
-                w.put(def, rep, typed_value);
+                put(w, def, rep, typed_value);
                 break;
             }
             case kind::short_kind: {
                 auto& w = _writer->column<map_physical_type(kind::short_kind)>(writer_id);
                 auto typed_value = value_cast<int16_t>(dv);
-                w.put(def, rep, typed_value);
+                put(w, def, rep, typed_value);
                 break;
             }
             case kind::simple_date: {
                 auto& w = _writer->column<map_physical_type(kind::simple_date)>(writer_id);
                 auto typed_value = value_cast<uint32_t>(dv);
-                w.put(def, rep, typed_value);
+                put(w, def, rep, typed_value);
                 break;
             }
             case kind::time: {
                 auto& w = _writer->column<map_physical_type(kind::time)>(writer_id);
                 auto typed_value = value_cast<int64_t>(dv);
-                w.put(def, rep, typed_value);
+                put(w, def, rep, typed_value);
                 break;
             }
             case kind::timestamp: {
                 auto& w = _writer->column<map_physical_type(kind::timestamp)>(writer_id);
                 auto typed_value = value_cast<db_clock::time_point>(dv);
                 int64_t millis = typed_value.time_since_epoch().count();
-                w.put(def, rep, millis);
+                put(w, def, rep, millis);
                 break;
             }
             case kind::utf8:{
                 auto& w = _writer->column<map_physical_type(kind::utf8)>(writer_id);
                 auto typed_value = value_cast<sstring>(dv);
-                w.put(def, rep, sstring_to_bytes_view(typed_value));
+                put(w, def, rep, sstring_to_bytes_view(typed_value));
                 break;
             }
             }
@@ -952,7 +964,7 @@ public:
                 constexpr parquet4seastar::format::Type::type pt = lt.physical_type;
                 auto& w = _writer->column<pt>(_pws.cell_mappings[id].value);
                 using input_type = typename std::remove_reference_t<decltype(w)>::input_type;
-                w.put(1, rep(), input_type{});
+                put(w, 1, rep(), input_type{});
             },
             [&] (const parquet4seastar::logical_type::INT96&) {
                 assert(false && "INT96 must not be chosen as a writer type");
@@ -1012,7 +1024,7 @@ public:
                     constexpr parquet4seastar::format::Type::type pt = lt.physical_type;
                     auto& w = _writer->column<pt>(_pws.cell_mappings[id].value);
                     using input_type = typename std::remove_reference_t<decltype(w)>::input_type;
-                    w.put(0, 0, input_type{});
+                    put(w, 0, 0, input_type{});
                 },
                 [&] (const parquet4seastar::logical_type::INT96&) {
                     assert(false && "INT96 must not be chosen as a writer type");
@@ -1033,7 +1045,7 @@ public:
                     constexpr parquet4seastar::format::Type::type pt = lt.physical_type;
                     auto& w = _writer->column<pt>(_pws.cell_mappings[id].value);
                     using input_type = typename std::remove_reference_t<decltype(w)>::input_type;
-                    w.put(0, 0, input_type{});
+                    put(w, 0, 0, input_type{});
                 },
                 [&] (const parquet4seastar::logical_type::INT96&) {
                     assert(false && "INT96 must not be chosen as a writer type");
@@ -1064,6 +1076,11 @@ public:
         }
         _written_row = false;
         _written_static_row = false;
+
+        if (_estimated_row_group_size > ROW_GROUP_FLUSH_THRESHOLD) {
+            _writer->flush_row_group().get();
+            _estimated_row_group_size = 0;
+        }
     }
 };
 
