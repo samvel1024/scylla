@@ -418,7 +418,6 @@ perf_tests = set([
 apps = set([
     'scylla',
     'test/tools/cql_repl',
-    'tools/scylla-types',
 ])
 
 tests = scylla_tests | perf_tests
@@ -548,7 +547,6 @@ scylla_core = (['database.cc',
                 'transport/event_notifier.cc',
                 'transport/server.cc',
                 'transport/messages/result_message.cc',
-                'cdc/cdc_partitioner.cc',
                 'cdc/log.cc',
                 'cdc/split.cc',
                 'cdc/generation.cc',
@@ -908,8 +906,6 @@ scylla_tests_dependencies = scylla_core + idls + scylla_tests_generic_dependenci
 deps = {
     'scylla': idls + ['main.cc', 'release.cc', 'build_id.cc'] + scylla_core + api + alternator + redis,
     'test/tools/cql_repl': idls + ['test/tools/cql_repl.cc'] + scylla_core + scylla_tests_generic_dependencies,
-    #FIXME: we don't need all of scylla_core here, only the types module, need to modularize scylla_core.
-    'tools/scylla-types': idls + ['tools/scylla-types.cc'] + scylla_core,
 }
 
 pure_boost_tests = set([
@@ -1291,7 +1287,7 @@ def configure_zstd(build_dir, mode):
 args.user_cflags += " " + pkg_config('jsoncpp', '--cflags')
 args.user_cflags += ' -march=' + args.target
 libs = ' '.join([maybe_static(args.staticyamlcpp, '-lyaml-cpp'), '-latomic', '-llz4', '-lz', '-lsnappy', pkg_config('jsoncpp', '--libs'),
-                 ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread',
+                 ' -lstdc++fs', ' -lcrypt', ' -lcryptopp', ' -lpthread', '-lparquet4seastar',
                  maybe_static(args.staticboost, '-lboost_date_time -lboost_regex -licuuc'), ])
 
 pkgconfig_libs = [
