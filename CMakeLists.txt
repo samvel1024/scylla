@@ -156,5 +156,5 @@ target_include_directories(scylla PUBLIC
         ${Boost_INCLUDE_DIRS}
         xxhash
         libdeflate
-        /home/sme/parquet4seastar/include
+        $ENV{HOME}/parquet4seastar/include
         build/${BUILD_TYPE}/gen)

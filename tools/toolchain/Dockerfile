@@ -24,7 +24,5 @@ RUN cd scylla-jmx && mvn --file scylla-jmx-parent/pom.xml package
 RUN chmod 1777 /tmp
 
 
-ENV LIBRARY_PATH=/home/sme/parquet4seastar/build/:/thrift/lib/cpp/.libs/:${LIBRARY_PATH}
-ENV LD_LIBRARY_PATH=/home/sme/parquet4seastar/build/:/thrift/lib/cpp/.libs/:${LD_LIBRARY_PATH}
 
 CMD /bin/bash

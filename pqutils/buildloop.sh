@@ -3,7 +3,7 @@
 ulimit -n 65535
 sudo chmod 1777 /tmp
 mkdir -p /tmp/scylla-parquet
-sudo ln -s /home/sme/parquet4seastar/include/parquet4seastar /usr/include
+sudo ln -s ${HOME}/parquet4seastar/include/parquet4seastar /usr/include
 SCYLLA_PID=""
 
 function sync_kill() {
@@ -15,8 +15,8 @@ function sync_kill() {
 bash -c "cd /scylla-jmx && ./scripts/scylla-jmx" &
 echo Started JMX
 
-export LIBRARY_PATH=/home/sme/parquet4seastar/build/:/thrift/lib/cpp/.libs/:${LIBRARY_PATH}
-export LD_LIBRARY_PATH=/home/sme/parquet4seastar/build/:/thrift/lib/cpp/.libs/:${LD_LIBRARY_PATH}
+export LIBRARY_PATH=${HOME}/parquet4seastar/build/:/thrift/lib/cpp/.libs/:${LIBRARY_PATH}
+export LD_LIBRARY_PATH=${HOME}/parquet4seastar/build/:/thrift/lib/cpp/.libs/:${LD_LIBRARY_PATH}
 trap 'jobs -p && kill $(jobs -p)' EXIT
 
 
@@ -43,7 +43,7 @@ while true; do
   echo "********************************** STARTING BUILD **************************************************************"
   echo "****************************************************************************************************************"
 
-  PKG_CONFIG_PATH=/home/sme/scylla/scylla-local PATH=/usr/lib64/ccache:$PATH ninja -j12 build/dev/scylla
+  PKG_CONFIG_PATH=${HOME}/scylla/scylla-local PATH=/usr/lib64/ccache:$PATH ninja -j6 build/dev/scylla
   BUILD_STATUS=$?
 #  notify-send "Build finished with status ${BUILD_STATUS}"
 
@@ -52,7 +52,7 @@ while true; do
   echo "________________________________________________________________________________________________________________"
 
   if [ "$BUILD_STATUS" -eq "0" ]; then
-    ./build/dev/scylla --workdir /home/sme/scylla/datadir --max-io-requests 10 &
+    ./build/dev/scylla --workdir ${HOME}/scylla/datadir --max-io-requests 10 &
     SCYLLA_PID=$!
   fi
 
